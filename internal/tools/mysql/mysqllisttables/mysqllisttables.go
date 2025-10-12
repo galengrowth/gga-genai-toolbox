@@ -24,7 +24,6 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/sources/cloudsqlmysql"
 	"github.com/googleapis/genai-toolbox/internal/sources/mysql"
 	"github.com/googleapis/genai-toolbox/internal/tools"
-	"github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqlcommon"
 )
 
 const kind string = "mysql-list-tables"
@@ -175,11 +174,11 @@ const listTablesStatement = `
         INFORMATION_SCHEMA.TABLES T
     CROSS JOIN (SELECT @table_names := ?, @output_format := ?) AS variables
     WHERE
-        T.TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+        T.TABLE_SCHEMA = ?
         AND (NULLIF(TRIM(@table_names), '') IS NULL OR FIND_IN_SET(T.TABLE_NAME, @table_names))
         AND T.TABLE_TYPE = 'BASE TABLE'
     ORDER BY
-        T.TABLE_SCHEMA, T.TABLE_NAME;
+        T.TABLE_NAME;
 `
 
 func init() {
@@ -234,6 +233,15 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
 	}
 
+	// get dbName from underlying config
+	dbName := ""
+	switch real := rawS.(type) {
+	case interface{ DatabaseName() string }:
+		dbName = real.DatabaseName()
+	default:
+		return nil, fmt.Errorf("cannot resolve database name from source type")
+	}
+
 	allParameters := tools.Parameters{
 		tools.NewStringParameterWithDefault("table_names", "", "Optional: A comma-separated list of table names. If empty, details for all tables will be listed."),
 		tools.NewStringParameterWithDefault("output_format", "detailed", "Optional: Use 'simple' for names only or 'detailed' for full info."),
@@ -248,6 +256,7 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		AllParams:    allParameters,
 		AuthRequired: cfg.AuthRequired,
 		Pool:         s.MySQLPool(),
+		dbName:       dbName,
 		manifest:     tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
 		mcpManifest:  mcpManifest,
 	}
@@ -262,10 +271,10 @@ type Tool struct {
 	Kind         string           `yaml:"kind"`
 	AuthRequired []string         `yaml:"authRequired"`
 	AllParams    tools.Parameters `yaml:"allParams"`
-
-	Pool        *sql.DB
-	manifest    tools.Manifest
-	mcpManifest tools.McpManifest
+	Pool         *sql.DB
+	dbName       string
+	manifest     tools.Manifest
+	mcpManifest  tools.McpManifest
 }
 
 func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
@@ -280,7 +289,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		return nil, fmt.Errorf("invalid value for output_format: must be 'simple' or 'detailed', but got %q", outputFormat)
 	}
 
-	results, err := t.Pool.QueryContext(ctx, listTablesStatement, tableNames, outputFormat)
+	results, err := t.Pool.QueryContext(ctx, listTablesStatement, tableNames, outputFormat, t.dbName)
 	if err != nil {
 		return nil, fmt.Errorf("unable to execute query: %w", err)
 	}
@@ -290,7 +299,6 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		return nil, fmt.Errorf("unable to retrieve rows column name: %w", err)
 	}
 
-	// create an array of values for each column, which can be re-used to scan each row
 	rawValues := make([]any, len(cols))
 	values := make([]any, len(cols))
 	for i := range rawValues {
@@ -298,38 +306,23 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	}
 	defer results.Close()
 
-	colTypes, err := results.ColumnTypes()
-	if err != nil {
-		return nil, fmt.Errorf("unable to get column types: %w", err)
-	}
-
-	var out []any
+	var rows []map[string]any
 	for results.Next() {
-		err := results.Scan(values...)
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
+		if err := results.Scan(values...); err != nil {
+			return nil, fmt.Errorf("unable to scan row: %w", err)
 		}
-		vMap := make(map[string]any)
-		for i, name := range cols {
+		row := make(map[string]any, len(cols))
+		for i, col := range cols {
 			val := rawValues[i]
-			if val == nil {
-				vMap[name] = nil
-				continue
-			}
-
-			vMap[name], err = mysqlcommon.ConvertToType(colTypes[i], val)
-			if err != nil {
-				return nil, fmt.Errorf("errors encountered when converting values: %w", err)
+			if b, ok := val.([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = val
 			}
 		}
-		out = append(out, vMap)
+		rows = append(rows, row)
 	}
-
-	if err := results.Err(); err != nil {
-		return nil, fmt.Errorf("errors encountered during row iteration: %w", err)
-	}
-
-	return out, nil
+	return rows, nil
 }
 
 func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
