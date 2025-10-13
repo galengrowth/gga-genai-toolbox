@@ -17,6 +17,7 @@ package mysqllisttables
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	yaml "github.com/goccy/go-yaml"
@@ -24,6 +25,7 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/sources/cloudsqlmysql"
 	"github.com/googleapis/genai-toolbox/internal/sources/mysql"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util"
 )
 
 const kind string = "mysql-list-tables"
@@ -322,6 +324,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		}
 		rows = append(rows, row)
 	}
+	paramsJSON, _ := json.Marshal(paramsMap)
+	util.LogAndPostBilling(ctx, t.Kind, len(rows), string(paramsJSON))
 	return rows, nil
 }
 

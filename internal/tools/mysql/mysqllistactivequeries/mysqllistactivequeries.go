@@ -17,6 +17,7 @@ package mysqllistactivequeries
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	yaml "github.com/goccy/go-yaml"
@@ -256,7 +257,9 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	if err := results.Err(); err != nil {
 		return nil, fmt.Errorf("errors encountered during row iteration: %w", err)
 	}
-
+	paramsJSON, _ := json.Marshal(paramsMap)
+	queryDesc := fmt.Sprintf("params: %s, statement: %s", string(paramsJSON), t.statement)
+	util.LogAndPostBilling(ctx, t.Kind, len(out), queryDesc)
 	return out, nil
 }
 

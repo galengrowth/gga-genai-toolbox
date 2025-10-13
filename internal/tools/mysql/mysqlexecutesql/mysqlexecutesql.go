@@ -164,7 +164,6 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 				vMap[name] = nil
 				continue
 			}
-
 			vMap[name], err = mysqlcommon.ConvertToType(colTypes[i], val)
 			if err != nil {
 				return nil, fmt.Errorf("errors encountered when converting values: %w", err)
@@ -172,11 +171,10 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		}
 		out = append(out, vMap)
 	}
-
 	if err := results.Err(); err != nil {
 		return nil, fmt.Errorf("errors encountered during row iteration: %w", err)
 	}
-
+	util.LogAndPostBilling(ctx, t.Kind, len(out), sql)
 	return out, nil
 }
 

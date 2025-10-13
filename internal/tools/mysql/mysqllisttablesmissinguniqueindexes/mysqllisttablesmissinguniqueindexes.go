@@ -17,6 +17,7 @@ package mysqllisttablesmissinguniqueindexes
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	yaml "github.com/goccy/go-yaml"
@@ -205,6 +206,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		return nil, fmt.Errorf("errors encountered during row iteration: %w", err)
 	}
 
+	paramsJSON, _ := json.Marshal(paramsMap)
+	util.LogAndPostBilling(ctx, t.Kind, len(out), string(paramsJSON))
 	return out, nil
 }
 
