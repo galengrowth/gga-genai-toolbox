@@ -318,6 +318,11 @@ type ToolsFile struct {
 	AuthServices server.AuthServiceConfigs `yaml:"authServices"`
 	Tools        server.ToolConfigs        `yaml:"tools"`
 	Toolsets     server.ToolsetConfigs     `yaml:"toolsets"`
+	// Custom allows user-defined configuration not interpreted by the core schema.
+	// Example:
+	// custom:
+	//   billingEndpoint: "https://localhost:7213/api/Billing"
+	Custom map[string]any `yaml:"custom"`
 }
 
 // parseEnv replaces environment variables ${ENV_NAME} with their values.
@@ -836,6 +841,8 @@ func run(cmd *Command) error {
 	}
 
 	cmd.cfg.SourceConfigs, cmd.cfg.AuthServiceConfigs, cmd.cfg.ToolConfigs, cmd.cfg.ToolsetConfigs = toolsFile.Sources, toolsFile.AuthServices, toolsFile.Tools, toolsFile.Toolsets
+	cmd.cfg.Custom = toolsFile.Custom
+	cmd.cfg.Custom = toolsFile.Custom
 	authSourceConfigs := toolsFile.AuthSources
 	if authSourceConfigs != nil {
 		cmd.logger.WarnContext(ctx, "`authSources` is deprecated, use `authServices` instead")

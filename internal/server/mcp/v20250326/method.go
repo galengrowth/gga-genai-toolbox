@@ -93,8 +93,15 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 		return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, err.Error(), nil), err
 	}
 
-	// Get access token
-	accessToken := tools.AccessToken(header.Get("Authorization"))
+	// Get access token and attach raw header to context for downstream utilities (e.g., billing)
+	authHeader := ""
+	if header != nil {
+		authHeader = header.Get("Authorization")
+	}
+	accessToken := tools.AccessToken(authHeader)
+	if authHeader != "" {
+		ctx = util.WithAuthorizationHeader(ctx, authHeader)
+	}
 
 	// Check if this specific tool requires the standard authorization header
 	if tool.RequiresClientAuthorization() {
@@ -133,6 +140,14 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 				continue
 			}
 			claimsFromAuth[aS.GetName()] = claims
+		}
+	}
+
+	// Attach one set of verified claims into context for downstream utilities like billing
+	if len(claimsFromAuth) > 0 {
+		for _, c := range claimsFromAuth {
+			ctx = util.WithJWTClaims(ctx, c)
+			break
 		}
 	}
 

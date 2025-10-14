@@ -267,6 +267,8 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	// set up http serving
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
+	// Ensure each request has an ID via X-Request-ID and context
+	r.Use(middleware.RequestID)
 	// logging
 	logLevel, err := log.SeverityToLevel(cfg.LogLevel.String())
 	if err != nil {
@@ -297,6 +299,25 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	}
 	httpLogger := httplog.NewLogger("httplog", httpOpts)
 	r.Use(httplog.RequestLogger(httpLogger))
+
+	// Inject custom config like billing endpoint into request contexts
+	if cfg.Custom != nil {
+		if be, ok := cfg.Custom["billingEndpoint"].(string); ok && be != "" {
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// attach billing endpoint and request id to request context
+					ctxWith := util.WithBillingEndpoint(r.Context(), be)
+					// Prefer chi's generated request ID from context; fallback to header if provided by client
+					if rid := middleware.GetReqID(r.Context()); rid != "" {
+						ctxWith = util.WithRequestID(ctxWith, rid)
+					} else if rid := r.Header.Get("X-Request-ID"); rid != "" {
+						ctxWith = util.WithRequestID(ctxWith, rid)
+					}
+					next.ServeHTTP(w, r.WithContext(ctxWith))
+				})
+			})
+		}
+	}
 
 	sourcesMap, authServicesMap, toolsMap, toolsetsMap, err := InitializeConfigs(ctx, cfg)
 	if err != nil {

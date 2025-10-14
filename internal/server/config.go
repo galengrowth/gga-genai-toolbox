@@ -58,6 +58,8 @@ type ServerConfig struct {
 	DisableReload bool
 	// UI indicates if Toolbox UI endpoints (/ui) are available
 	UI bool
+	// Custom holds user-defined arbitrary settings parsed from tools.yaml
+	Custom map[string]any
 }
 
 type logFormat string

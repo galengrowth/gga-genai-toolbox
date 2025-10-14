@@ -168,8 +168,13 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract OAuth access token from the "Authorization" header (currently for
-	// BigQuery end-user credentials usage only)
-	accessToken := tools.AccessToken(r.Header.Get("Authorization"))
+	// BigQuery end-user credentials usage only). Also attach the raw header to context
+	// so downstream utilities (e.g., billing) can forward it.
+	authHeader := r.Header.Get("Authorization")
+	accessToken := tools.AccessToken(authHeader)
+	if authHeader != "" {
+		ctx = util.WithAuthorizationHeader(ctx, authHeader)
+	}
 
 	// Check if this specific tool requires the standard authorization header
 	if tool.RequiresClientAuthorization() {
@@ -195,6 +200,15 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		claimsFromAuth[aS.GetName()] = claims
+	}
+
+	// If any claims were verified, attach a merged/basic set into context for billing utilities
+	if len(claimsFromAuth) > 0 {
+		// Prefer the first service's claims; for cross-provider, you can adjust merging as needed
+		for _, c := range claimsFromAuth {
+			ctx = util.WithJWTClaims(ctx, c)
+			break
+		}
 	}
 
 	// Tool authorization check
