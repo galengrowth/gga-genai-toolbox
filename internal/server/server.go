@@ -300,13 +300,21 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	httpLogger := httplog.NewLogger("httplog", httpOpts)
 	r.Use(httplog.RequestLogger(httpLogger))
 
-	// Inject custom config like billing endpoint into request contexts
+	// Inject custom config like billing/quota endpoints into request contexts
 	if cfg.Custom != nil {
-		if be, ok := cfg.Custom["billingEndpoint"].(string); ok && be != "" {
+		be, hasBE := cfg.Custom["billingEndpoint"].(string)
+		qe, hasQE := cfg.Custom["quotaEndpoint"].(string)
+		if (hasBE && be != "") || (hasQE && qe != "") {
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					// attach billing endpoint and request id to request context
-					ctxWith := util.WithBillingEndpoint(r.Context(), be)
+					// attach endpoints and request id to request context (if provided)
+					ctxWith := r.Context()
+					if hasBE && be != "" {
+						ctxWith = util.WithBillingEndpoint(ctxWith, be)
+					}
+					if hasQE && qe != "" {
+						ctxWith = util.WithQuotaEndpoint(ctxWith, qe)
+					}
 					// Prefer chi's generated request ID from context; fallback to header if provided by client
 					if rid := middleware.GetReqID(r.Context()); rid != "" {
 						ctxWith = util.WithRequestID(ctxWith, rid)

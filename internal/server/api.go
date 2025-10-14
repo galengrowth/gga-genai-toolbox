@@ -253,6 +253,26 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.DebugContext(ctx, fmt.Sprintf("invocation params: %s", params))
 
+	// Quota preflight: when quotaEndpoint is configured, strictly enforce
+	if qe := util.QuotaEndpointFromContext(ctx); qe != "" {
+		allowed, remaining, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
+		if qerr != nil {
+			msg := fmt.Errorf("quota preflight failed: %s", qerr)
+			s.logger.ErrorContext(ctx, msg.Error())
+			_ = render.Render(w, r, newErrResponse(msg, http.StatusServiceUnavailable))
+			return
+		}
+		if !allowed {
+			if reason == "" {
+				reason = "row limit exceeded"
+			}
+			err = fmt.Errorf("quota denied: %s (remaining_rows=%d)", reason, remaining)
+			s.logger.DebugContext(ctx, err.Error())
+			_ = render.Render(w, r, newErrResponse(err, http.StatusTooManyRequests))
+			return
+		}
+	}
+
 	res, err := tool.Invoke(ctx, params, accessToken)
 
 	// Determine what error to return to the users.

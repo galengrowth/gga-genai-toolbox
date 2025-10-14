@@ -1,0 +1,69 @@
+# HTA MySQL prebuilt config with Auth and custom billing/quota endpoints
+# Set the environment variables before running the server.
+
+sources:
+  mysql-source:
+    kind: mysql
+    host: ${MYSQL_HOST}
+    port: ${MYSQL_PORT}
+    database: ${MYSQL_DATABASE}
+    user: ${MYSQL_USER}
+    password: ${MYSQL_PASSWORD}
+    # Optional DSN parameters via YAML map in env (e.g., {tls: preferred})
+    queryParams: ${MYSQL_QUERY_PARAMS:}
+    queryTimeout: 30s
+
+authServices:
+  hta:
+    kind: hta
+    # Configure your HTA/Auth0/OpenID provider details via env or static values
+    # issuer: ${HTA_ISSUER}
+    # audience: ${HTA_AUDIENCE}
+
+tools:
+  execute_sql:
+    kind: mysql-execute-sql
+    source: mysql-source
+    description: Use this tool to execute SQL.
+  list_active_queries:
+    kind: mysql-list-active-queries
+    source: mysql-source
+    description: Lists top N (default 10) ongoing queries from processlist and innodb_trx, ordered by execution time in descending order.
+  get_query_plan:
+    kind: mysql-sql
+    source: mysql-source
+    description: "Explain plan for a SQL statement"
+    statement: |
+      EXPLAIN FORMAT=JSON {{.sql_statement}};
+    templateParameters:
+      - name: sql_statement
+        type: string
+        description: "the SQL statement to explain"
+        required: true
+  list_tables:
+    kind: mysql-list-tables
+    source: mysql-source
+    description: "Lists detailed schema information for user-created tables"
+  list_tables_missing_unique_indexes:
+    kind: mysql-list-tables-missing-unique-indexes
+    source: mysql-source
+    description: "Find tables that do not have primary or unique key constraint"
+  list_table_fragmentation:
+    kind: mysql-list-table-fragmentation
+    source: mysql-source
+    description: "List table fragmentation in MySQL"
+
+toolsets:
+  mysql_database_tools:
+    - execute_sql
+    - list_tables
+    - get_query_plan
+    - list_active_queries
+    - list_tables_missing_unique_indexes
+    - list_table_fragmentation
+
+custom:
+  # Required to enforce quota; if omitted, quota checks are skipped entirely
+  quotaEndpoint: ${QUOTA_ENDPOINT}
+  # Best-effort post-execution billing endpoint
+  billingEndpoint: ${BILLING_ENDPOINT}
