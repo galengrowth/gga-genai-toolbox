@@ -15,30 +15,34 @@
 package hta
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2" // JWKS caching
-	"github.com/golang-jwt/jwt/v5"     // JWT handling
 	"github.com/googleapis/genai-toolbox/internal/auth"
 )
 
-// AuthServiceKind is the canonical kind string for this AuthZero auth service.
-// Per latest naming decision we use only "authzero" (no aliases retained).
-const AuthServiceKind string = "authzero"
+// AuthServiceKind is the kind string for the custom HTA auth service.
+// This service delegates token validation to an external HTTP endpoint that
+// returns an allow/deny style response (plus optional claims) via POST.
+const AuthServiceKind string = "hta"
 
 // validate interface
 var _ auth.AuthServiceConfig = Config{}
 
 // Auth service configuration for AuthZero (JWT)
 type Config struct {
-	Name     string `yaml:"name" validate:"required"`
-	Kind     string `yaml:"kind" validate:"required"`
-	Domain   string `yaml:"domain" validate:"required,url"`
-	Audience string `yaml:"audience" validate:"required,url"`
+	Name         string `yaml:"name" validate:"required"`
+	Kind         string `yaml:"kind" validate:"required"`
+	AuthEndpoint string `yaml:"authEndPoint" validate:"required,url"`
+	// Optional timeout for outbound auth POST (default 5s)
+	Timeout string `yaml:"timeout" validate:"omitempty"`
 }
 
 // Returns the auth service kind
@@ -48,57 +52,46 @@ func (cfg Config) AuthServiceConfigKind() string {
 
 // Initialize an AuthZero auth service (JWT over Auth0 domain style)
 func (cfg Config) Initialize() (auth.AuthService, error) {
-	jwksURL := fmt.Sprintf("https://%s/.well-known/jwks.json", strings.TrimPrefix(cfg.Domain, "https://"))
-
-	// Configure JWKS caching
-	options := keyfunc.Options{
-		RefreshInterval:  time.Hour,       // Refresh JWKS every hour
-		RefreshRateLimit: time.Minute * 5, // Limit failed lookup retries
+	to := 5 * time.Second
+	if cfg.Timeout != "" {
+		if d, err := time.ParseDuration(cfg.Timeout); err == nil && d > 0 {
+			to = d
+		} else if err != nil {
+			return nil, fmt.Errorf("invalid timeout value %q: %w", cfg.Timeout, err)
+		}
 	}
-
-	jwks, err := keyfunc.Get(jwksURL, options)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get JWKS from %s: %w", jwksURL, err)
-	}
-
-	a := &AuthService{
-		Name:     cfg.Name,
-		Kind:     AuthServiceKind,
-		Domain:   cfg.Domain,
-		Audience: cfg.Audience,
-		JWKS:     jwks,
-	}
-	return a, nil
+	return &AuthService{
+		name:         cfg.Name,
+		kind:         AuthServiceKind,
+		authEndpoint: cfg.AuthEndpoint,
+		timeout:      to,
+		client:       &http.Client{Timeout: to},
+	}, nil
 }
 
-var _ auth.AuthService = AuthService{}
+var _ auth.AuthService = (*AuthService)(nil)
 
 // AuthService stores AuthZero/JWT validation info.
 type AuthService struct {
-	Name     string `yaml:"name"`
-	Kind     string `yaml:"kind"`
-	Domain   string `yaml:"domain"`
-	Audience string `yaml:"audience"`
-	JWKS     *keyfunc.JWKS
+	name         string
+	kind         string
+	authEndpoint string
+	timeout      time.Duration
+	client       *http.Client
 }
 
 // Returns the auth service kind
-func (a AuthService) AuthServiceKind() string {
-	return AuthServiceKind
-}
+func (a *AuthService) AuthServiceKind() string { return a.kind }
 
 // Returns the name of the auth service
-func (a AuthService) GetName() string {
-	return a.Name
-}
+func (a *AuthService) GetName() string { return a.name }
 
 // Validates "Authorization: Bearer <token>" JWT, returning claims map if valid.
-func (a AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (map[string]any, error) {
+func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (map[string]any, error) {
 	authHeader := h.Get("Authorization")
 	if authHeader == "" {
-		return nil, nil // No Authorization header, no token to validate
+		return nil, nil
 	}
-
 	const bearerPrefix = "Bearer "
 	if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 		return nil, fmt.Errorf("authorization header must be in 'Bearer <token>' format")
@@ -108,46 +101,51 @@ func (a AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (ma
 		return nil, fmt.Errorf("bearer token is empty")
 	}
 
-	parsedToken, err := jwt.Parse(token, a.JWKS.Keyfunc)
+	// Build request payload
+	reqBody := map[string]string{"token": token}
+	b, _ := json.Marshal(reqBody)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.authEndpoint, bytes.NewReader(b))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse or validate JWT: %w", err)
+		return nil, fmt.Errorf("creating auth request: %w", err)
 	}
-	if !parsedToken.Valid {
-		return nil, fmt.Errorf("invalid JWT token")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("auth endpoint request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("auth endpoint rejected token: status=%d body=%s", resp.StatusCode, truncateForLog(string(body), 300))
 	}
 
-	claims, ok := parsedToken.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil, fmt.Errorf("invalid JWT claims format")
+	// Expected minimal schema: {"valid":true, "claims":{...}}; claims optional
+	var parsed struct {
+		Valid  bool           `json:"valid"`
+		Claims map[string]any `json:"claims"`
+		Error  string         `json:"error"`
 	}
-
-	// Validate issuer (must be exactly "https://<domain>/")
-	issuer, _ := claims["iss"].(string)
-	expectedIssuer := "https://" + strings.TrimPrefix(a.Domain, "https://") + "/"
-	if issuer != expectedIssuer {
-		return nil, fmt.Errorf("invalid JWT issuer: expected %s, got %s", expectedIssuer, issuer)
+	if len(body) == 0 {
+		return nil, errors.New("empty response from auth endpoint")
 	}
-
-	// Validate audience (string or []interface{})
-	audienceFound := false
-	if audVal, ok := claims["aud"]; ok {
-		switch aud := audVal.(type) {
-		case string:
-			if aud == a.Audience {
-				audienceFound = true
-			}
-		case []interface{}:
-			for _, v := range aud {
-				if audStr, ok := v.(string); ok && audStr == a.Audience {
-					audienceFound = true
-					break
-				}
-			}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("invalid auth endpoint JSON: %w", err)
+	}
+	if !parsed.Valid {
+		if parsed.Error != "" {
+			return nil, fmt.Errorf("token invalid: %s", parsed.Error)
 		}
+		return nil, fmt.Errorf("token invalid")
 	}
-	if !audienceFound {
-		return nil, fmt.Errorf("invalid JWT audience: expected %s", a.Audience)
-	}
+	// Return claims (may be nil)
+	return parsed.Claims, nil
+}
 
-	return claims, nil
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }

@@ -20,8 +20,9 @@ import (
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/auth"
+	"github.com/googleapis/genai-toolbox/internal/auth/authzero" // AuthZero auth config
 	"github.com/googleapis/genai-toolbox/internal/auth/google"
-	"github.com/googleapis/genai-toolbox/internal/auth/hta" // Import HTA's auth config
+	"github.com/googleapis/genai-toolbox/internal/auth/hta" // Custom HTA auth (POST validation)
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
@@ -194,7 +195,13 @@ func (c *AuthServiceConfigs) UnmarshalYAML(ctx context.Context, unmarshal func(i
 				return fmt.Errorf("unable to parse as %q: %w", kind, err)
 			}
 			(*c)[name] = actual
-		case hta.AuthServiceKind:
+		case authzero.AuthServiceKind:
+			actual := authzero.Config{Name: name, Kind: fmt.Sprintf("%v", kind)}
+			if err := dec.DecodeContext(ctx, &actual); err != nil {
+				return fmt.Errorf("unable to parse as %q: %w", kind, err)
+			}
+			(*c)[name] = actual
+		case hta.AuthServiceKind: // custom external POST validator
 			actual := hta.Config{Name: name, Kind: fmt.Sprintf("%v", kind)}
 			if err := dec.DecodeContext(ctx, &actual); err != nil {
 				return fmt.Errorf("unable to parse as %q: %w", kind, err)

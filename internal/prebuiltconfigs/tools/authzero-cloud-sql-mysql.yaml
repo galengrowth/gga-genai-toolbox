@@ -1,4 +1,4 @@
-# HTA Cloud SQL MySQL prebuilt config with Auth and custom billing/quota endpoints
+# AuthZero Cloud SQL MySQL prebuilt config with Auth and custom billing/quota endpoints
 # Set the environment variables before running the server.
 
 sources:
@@ -13,12 +13,11 @@ sources:
     ipType: ${CLOUD_SQL_MYSQL_IP_TYPE:PUBLIC}
 
 authServices:
-  custom_post_validator:
-    kind: hta
-    # Endpoint that validates the bearer token via POST {"token": "<jwt>"}
-    authEndPoint: ${HTA_AUTH_ENDPOINT:https://example.com/auth/validate}
-    # Optional timeout for the POST (Go duration string). Defaults to 5s if omitted.
-    timeout: ${HTA_AUTH_TIMEOUT:5s}
+  authzero:
+    kind: authzero
+    # Configure your AuthZero/OpenID provider details via env or static values
+    # domain: ${AUTHZERO_DOMAIN}
+    # audience: ${AUTHZERO_AUDIENCE}
 
 tools:
   execute_sql:

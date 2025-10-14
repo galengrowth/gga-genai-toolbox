@@ -1,37 +1,37 @@
-# HTA Cloud SQL MySQL prebuilt config with Auth and custom billing/quota endpoints
+# AuthZero MySQL prebuilt config with Auth and custom billing/quota endpoints
 # Set the environment variables before running the server.
 
 sources:
-  cloud-sql-mysql-source:
-    kind: cloud-sql-mysql
-    project: ${CLOUD_SQL_MYSQL_PROJECT}
-    region: ${CLOUD_SQL_MYSQL_REGION}
-    instance: ${CLOUD_SQL_MYSQL_INSTANCE}
-    database: ${CLOUD_SQL_MYSQL_DATABASE}
-    user: ${CLOUD_SQL_MYSQL_USER}
-    password: ${CLOUD_SQL_MYSQL_PASSWORD}
-    ipType: ${CLOUD_SQL_MYSQL_IP_TYPE:PUBLIC}
+  mysql-source:
+    kind: mysql
+    host: ${MYSQL_HOST}
+    port: ${MYSQL_PORT}
+    database: ${MYSQL_DATABASE}
+    user: ${MYSQL_USER}
+    password: ${MYSQL_PASSWORD}
+    # Optional DSN parameters via YAML map in env (e.g., {tls: preferred})
+    queryParams: ${MYSQL_QUERY_PARAMS:}
+    queryTimeout: 30s
 
 authServices:
-  custom_post_validator:
-    kind: hta
-    # Endpoint that validates the bearer token via POST {"token": "<jwt>"}
-    authEndPoint: ${HTA_AUTH_ENDPOINT:https://example.com/auth/validate}
-    # Optional timeout for the POST (Go duration string). Defaults to 5s if omitted.
-    timeout: ${HTA_AUTH_TIMEOUT:5s}
+  authzero:
+    kind: authzero
+    # Configure your AuthZero/OpenID provider details via env or static values
+    # domain: ${AUTHZERO_DOMAIN}
+    # audience: ${AUTHZERO_AUDIENCE}
 
 tools:
   execute_sql:
     kind: mysql-execute-sql
-    source: cloud-sql-mysql-source
+    source: mysql-source
     description: Use this tool to execute SQL.
   list_active_queries:
     kind: mysql-list-active-queries
-    source: cloud-sql-mysql-source
+    source: mysql-source
     description: Lists top N (default 10) ongoing queries from processlist and innodb_trx, ordered by execution time in descending order.
   get_query_plan:
     kind: mysql-sql
-    source: cloud-sql-mysql-source
+    source: mysql-source
     description: "Explain plan for a SQL statement"
     statement: |
       EXPLAIN FORMAT=JSON {{.sql_statement}};
@@ -42,19 +42,19 @@ tools:
         required: true
   list_tables:
     kind: mysql-list-tables
-    source: cloud-sql-mysql-source
+    source: mysql-source
     description: "Lists detailed schema information for user-created tables"
   list_tables_missing_unique_indexes:
     kind: mysql-list-tables-missing-unique-indexes
-    source: cloud-sql-mysql-source
+    source: mysql-source
     description: "Find tables that do not have primary or unique key constraint"
   list_table_fragmentation:
     kind: mysql-list-table-fragmentation
-    source: cloud-sql-mysql-source
+    source: mysql-source
     description: "List table fragmentation in MySQL"
 
 toolsets:
-  cloud_sql_mysql_database_tools:
+  mysql_database_tools:
     - execute_sql
     - list_tables
     - get_query_plan

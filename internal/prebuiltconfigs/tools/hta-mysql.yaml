@@ -14,11 +14,12 @@ sources:
     queryTimeout: 30s
 
 authServices:
-  authzero:
-    kind: authzero
-    # Configure your AuthZero/OpenID provider details via env or static values
-    # domain: ${AUTHZERO_DOMAIN}
-    # audience: ${AUTHZERO_AUDIENCE}
+  custom_post_validator:
+    kind: hta
+    # Endpoint that validates the bearer token via POST {"token": "<jwt>"}
+    authEndPoint: ${HTA_AUTH_ENDPOINT:https://example.com/auth/validate}
+    # Optional timeout for the POST (Go duration string). Defaults to 5s if omitted.
+    timeout: ${HTA_AUTH_TIMEOUT:5s}
 
 tools:
   execute_sql:
