@@ -18,6 +18,11 @@ authServices:
     # Configure your AuthZero/OpenID provider details via env or static values
     # domain: ${AUTHZERO_DOMAIN}
     # audience: ${AUTHZERO_AUDIENCE}
+    # optional: restrict accepted JWT signing algorithms (default ["RS256"]).
+    # allowedAlgs:
+    #   - RS256
+    # optional: clock skew leeway for exp/nbf validation (default 30s). Accepts Go duration strings.
+    # leeway: 30s
 
 tools:
   execute_sql:
