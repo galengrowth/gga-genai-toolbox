@@ -195,7 +195,7 @@ func (c *AuthServiceConfigs) UnmarshalYAML(ctx context.Context, unmarshal func(i
 			}
 			(*c)[name] = actual
 		case hta.AuthServiceKind:
-			actual := hta.Config{Name: name}
+			actual := hta.Config{Name: name, Kind: fmt.Sprintf("%v", kind)}
 			if err := dec.DecodeContext(ctx, &actual); err != nil {
 				return fmt.Errorf("unable to parse as %q: %w", kind, err)
 			}

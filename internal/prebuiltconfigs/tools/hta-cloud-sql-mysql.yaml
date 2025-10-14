@@ -13,11 +13,11 @@ sources:
     ipType: ${CLOUD_SQL_MYSQL_IP_TYPE:PUBLIC}
 
 authServices:
-  hta:
-    kind: hta
-    # Configure your HTA/Auth0/OpenID provider details via env or static values
-    # issuer: ${HTA_ISSUER}
-    # audience: ${HTA_AUDIENCE}
+  authzero:
+    kind: authzero
+    # Configure your AuthZero/OpenID provider details via env or static values
+    # domain: ${AUTHZERO_DOMAIN}
+    # audience: ${AUTHZERO_AUDIENCE}
 
 tools:
   execute_sql:

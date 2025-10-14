@@ -21,17 +21,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2" // Updated import for JWKS caching
-	"github.com/golang-jwt/jwt/v5"     // New import for JWT handling
+	"github.com/MicahParks/keyfunc/v2" // JWKS caching
+	"github.com/golang-jwt/jwt/v5"     // JWT handling
 	"github.com/googleapis/genai-toolbox/internal/auth"
 )
 
-const AuthServiceKind string = "hta"
+// AuthServiceKind is the canonical kind string for this AuthZero auth service.
+// Per latest naming decision we use only "authzero" (no aliases retained).
+const AuthServiceKind string = "authzero"
 
 // validate interface
 var _ auth.AuthServiceConfig = Config{}
 
-// Auth service configuration for HTA (Auth0/JWT)
+// Auth service configuration for AuthZero (JWT)
 type Config struct {
 	Name     string `yaml:"name" validate:"required"`
 	Kind     string `yaml:"kind" validate:"required"`
@@ -44,7 +46,7 @@ func (cfg Config) AuthServiceConfigKind() string {
 	return AuthServiceKind
 }
 
-// Initialize an HTA auth service (Auth0/JWT)
+// Initialize an AuthZero auth service (JWT over Auth0 domain style)
 func (cfg Config) Initialize() (auth.AuthService, error) {
 	jwksURL := fmt.Sprintf("https://%s/.well-known/jwks.json", strings.TrimPrefix(cfg.Domain, "https://"))
 
@@ -71,7 +73,7 @@ func (cfg Config) Initialize() (auth.AuthService, error) {
 
 var _ auth.AuthService = AuthService{}
 
-// AuthService stores Auth0/JWT validation info.
+// AuthService stores AuthZero/JWT validation info.
 type AuthService struct {
 	Name     string `yaml:"name"`
 	Kind     string `yaml:"kind"`
