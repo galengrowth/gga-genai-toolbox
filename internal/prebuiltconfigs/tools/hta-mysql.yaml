@@ -16,8 +16,7 @@ sources:
 authServices:
   custom_post_validator:
     kind: hta
-    # Endpoint that validates the bearer token via POST with header: Authorization: Bearer <jwt>
-    # and body: {"token": "<jwt>"}
+    # Endpoint that validates the bearer token via POST with body: {"token": "<jwt>"}
     # Expected response: JSON object representing the claims (e.g., {"authorized": true, ...})
     authEndPoint: ${HTA_AUTH_ENDPOINT:https://example.com/auth/validate}
     # Optional timeout for the POST (Go duration string). Defaults to 5s if omitted.

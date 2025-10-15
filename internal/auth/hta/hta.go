@@ -101,7 +101,7 @@ func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (m
 		return nil, fmt.Errorf("bearer token is empty")
 	}
 
-	// Build request payload with token in body, and also set Authorization header
+	// Build request payload with token in body
 	reqBody := map[string]string{"token": token}
 	b, _ := json.Marshal(reqBody)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.authEndpoint, bytes.NewReader(b))
@@ -110,7 +110,6 @@ func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (m
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
