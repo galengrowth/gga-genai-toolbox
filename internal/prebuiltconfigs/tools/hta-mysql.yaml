@@ -16,7 +16,9 @@ sources:
 authServices:
   custom_post_validator:
     kind: hta
-    # Endpoint that validates the bearer token via POST {"token": "<jwt>"}
+    # Endpoint that validates the bearer token via POST with header: Authorization: Bearer <jwt>
+    # and body: {"token": "<jwt>"}
+    # Expected response: JSON object representing the claims (e.g., {"authorized": true, ...})
     authEndPoint: ${HTA_AUTH_ENDPOINT:https://example.com/auth/validate}
     # Optional timeout for the POST (Go duration string). Defaults to 5s if omitted.
     timeout: ${HTA_AUTH_TIMEOUT:5s}
@@ -70,6 +72,6 @@ custom:
   billingEndpoint: ${BILLING_ENDPOINT}
   # When true and quotaEndpoint is set, block tool execution if quota API fails/denies. When false, skip preflight.
   requireQuotaPreflight: ${REQUIRE_QUOTA_PREFLIGHT:false}
-  # When true and billingEndpoint is set, perform a synchronous billing POST after execution and fail on error.
-  # When false, billing is async best-effort.
+  # When true and billingEndpoint is set, perform an async billing POST after execution (non-blocking).
+  # When false, no billing calls are made.
   requireBillingPost: ${REQUIRE_BILLING_POST:false}

@@ -101,7 +101,7 @@ func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (m
 		return nil, fmt.Errorf("bearer token is empty")
 	}
 
-	// Build request payload
+	// Build request payload with token in body, and also set Authorization header
 	reqBody := map[string]string{"token": token}
 	b, _ := json.Marshal(reqBody)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.authEndpoint, bytes.NewReader(b))
@@ -110,6 +110,7 @@ func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (m
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -121,26 +122,15 @@ func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (m
 		return nil, fmt.Errorf("auth endpoint rejected token: status=%d body=%s", resp.StatusCode, truncateForLog(string(body), 300))
 	}
 
-	// Expected minimal schema: {"valid":true, "claims":{...}}; claims optional
-	var parsed struct {
-		Valid  bool           `json:"valid"`
-		Claims map[string]any `json:"claims"`
-		Error  string         `json:"error"`
-	}
+	// Decode the entire response as claims (matching the working old implementation)
+	var claims map[string]any
 	if len(body) == 0 {
 		return nil, errors.New("empty response from auth endpoint")
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("invalid auth endpoint JSON: %w", err)
+	if err := json.Unmarshal(body, &claims); err != nil {
+		return nil, fmt.Errorf("failed to decode claims from auth endpoint response: %w", err)
 	}
-	if !parsed.Valid {
-		if parsed.Error != "" {
-			return nil, fmt.Errorf("token invalid: %s", parsed.Error)
-		}
-		return nil, fmt.Errorf("token invalid")
-	}
-	// Return claims (may be nil)
-	return parsed.Claims, nil
+	return claims, nil
 }
 
 func truncateForLog(s string, max int) string {
