@@ -831,15 +831,25 @@ toolsets:
         - my_third_tool
 ```
 
-You can load toolsets by name:
+### Auth Services
 
-```python
-# This will load all tools
-all_tools = client.load_toolset()
+The `authServices` section defines authentication methods for securing tools. Currently supported: `authzero` (OIDC/JWT via Auth0) and `hta` (custom HTTP endpoint validation).
 
-# This will only load the tools listed in 'my_second_toolset'
-my_second_toolset = client.load_toolset("my_second_toolset")
+#### HTA (HTTP Token Auth)
+
+For custom token validation via an external HTTP endpoint:
+
+```yaml
+authServices:
+  my_hta_validator:
+    kind: hta
+    authEndPoint: "https://your-api.com/validate-token"
+    timeout: 5s  # Optional, defaults to 5s
 ```
+
+The endpoint receives a POST with `{"token": "<jwt>"}` and should return HTTP 2xx with JSON claims on success.
+
+For detailed API structure and examples, see the [Configure Auth](https://googleapis.github.io/genai-toolbox/how-to/configure-auth) guide.
 
 ## Versioning
 

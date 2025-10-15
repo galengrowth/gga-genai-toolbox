@@ -43,17 +43,16 @@ Content-Type: application/json
 ```
 
 ### Expected Response (JSON)
-Minimal accepted schema:
+The entire response body is treated as the claims map. For example:
 ```json
 {
-  "valid": true,
-  "claims": { "sub": "user-123", "email": "user@example.com" }
+  "authorized": true,
+  "sub": "user-123",
+  "email": "user@example.com"
 }
 ```
-If `valid` is `false`, you may include an `error` field:
-```json
-{ "valid": false, "error": "expired" }
-```
+- Success: HTTP 2xx status with any valid JSON.
+- Failure: HTTP non-2xx status (e.g., 401 for invalid token).
 
 ### Example Configuration
 ```yaml
@@ -76,7 +75,7 @@ authServices:
 - The token is only sent inside the JSON body (not forwarded headers apart from Content-Type/Accept).
 - Non-2xx response status codes are treated as authentication failure.
 - Response body is truncated in logs for safety (currently 300 chars where logged).
-- Returned `claims` map is optional; if absent, auth still considered successful if `valid` is true.
+- The entire response JSON is used as the claims map for downstream processing.
 
 ### Design Considerations
 | Aspect | Rationale |
