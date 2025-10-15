@@ -304,7 +304,23 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	if cfg.Custom != nil {
 		be, hasBE := cfg.Custom["billingEndpoint"].(string)
 		qe, hasQE := cfg.Custom["quotaEndpoint"].(string)
-		if (hasBE && be != "") || (hasQE && qe != "") {
+		// Optional enforcement flags
+		reqBill, hasReqBill := cfg.Custom["requireBillingPost"].(bool)
+		reqQuota, hasReqQuota := cfg.Custom["requireQuotaPreflight"].(bool)
+		// Startup warnings to highlight configuration intent
+		if hasReqQuota && reqQuota && (!hasQE || qe == "") {
+			l.WarnContext(ctx, "quota enforcement requested but quotaEndpoint is not configured; preflight will be skipped")
+		}
+		if hasReqBill && reqBill && (!hasBE || be == "") {
+			l.WarnContext(ctx, "billing enforcement requested but billingEndpoint is not configured; billing will be skipped")
+		}
+		if hasBE && be != "" && (!hasReqBill) {
+			l.InfoContext(ctx, "billing endpoint configured. Set custom.requireBillingPost to true to enable billing POSTs; false (or unset) skips billing calls.")
+		}
+		if hasQE && qe != "" && (!hasReqQuota) {
+			l.InfoContext(ctx, "quota configured. Set custom.requireQuotaPreflight to true to enforce pre-execution checks or false to skip.")
+		}
+		if (hasBE && be != "") || (hasQE && qe != "") || hasReqBill || hasReqQuota {
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					// attach endpoints and request id to request context (if provided)
@@ -314,6 +330,12 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 					}
 					if hasQE && qe != "" {
 						ctxWith = util.WithQuotaEndpoint(ctxWith, qe)
+					}
+					if hasReqBill {
+						ctxWith = util.WithBillingEnforcement(ctxWith, reqBill)
+					}
+					if hasReqQuota {
+						ctxWith = util.WithQuotaEnforcement(ctxWith, reqQuota)
 					}
 					// Prefer chi's generated request ID from context; fallback to header if provided by client
 					if rid := middleware.GetReqID(r.Context()); rid != "" {

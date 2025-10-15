@@ -71,3 +71,8 @@ custom:
   quotaEndpoint: ${QUOTA_ENDPOINT}
   # Best-effort post-execution billing endpoint
   billingEndpoint: ${BILLING_ENDPOINT}
+  # When true and quotaEndpoint is set, block tool execution if quota API fails/denies. When false, skip preflight.
+  requireQuotaPreflight: ${REQUIRE_QUOTA_PREFLIGHT:false}
+  # When true and billingEndpoint is set, perform a synchronous billing POST after execution and fail on error.
+  # When false, billing is async best-effort.
+  requireBillingPost: ${REQUIRE_BILLING_POST:false}

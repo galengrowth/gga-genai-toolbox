@@ -145,3 +145,38 @@ func TestLogAndPostBilling_ForwardsAuthorization(t *testing.T) {
 		t.Fatalf("authorization header not forwarded, got: %q", gotAuth)
 	}
 }
+
+func TestPostBillingSync_Success(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	if err := PostBillingSync(ctx, ts.URL, "tool", 1, ""); err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+}
+
+func TestPostBillingSync_Non2xx(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "fail", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	if err := PostBillingSync(ctx, ts.URL, "tool", 1, ""); err == nil {
+		t.Fatalf("expected error on non-2xx status")
+	}
+}
+
+func TestBillingEnforcementFromContext(t *testing.T) {
+	ctx := context.Background()
+	if v, ok := BillingEnforcementFromContext(ctx); ok {
+		t.Fatalf("expected not set, got ok=%v v=%v", ok, v)
+	}
+	ctx = WithBillingEnforcement(ctx, true)
+	if v, ok := BillingEnforcementFromContext(ctx); !ok || !v {
+		t.Fatalf("expected set=true, got ok=%v v=%v", ok, v)
+	}
+}

@@ -126,13 +126,15 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	// Tool authentication
 	// claimsFromAuth maps the name of the authservice to the claims retrieved from it.
 	claimsFromAuth := make(map[string]map[string]any)
+	authErrors := make(map[string]string)
 
 	// if using stdio, header will be nil and auth will not be supported
 	if header != nil {
-		for _, aS := range authServices {
+		for name, aS := range authServices {
 			claims, err := aS.GetClaimsFromHeader(ctx, header)
 			if err != nil {
-				logger.DebugContext(ctx, err.Error())
+				authErrors[name] = err.Error()
+				logger.DebugContext(ctx, fmt.Sprintf("auth service %s error: %s", name, err.Error()))
 				continue
 			}
 			if claims == nil {
@@ -154,7 +156,18 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	// Check if any of the specified auth services is verified
 	isAuthorized := tool.Authorized(verifiedAuthServices)
 	if !isAuthorized {
-		err = fmt.Errorf("unauthorized Tool call: Please make sure your specify correct auth headers: %w", tools.ErrUnauthorized)
+		// If we saw specific auth errors, surface the most relevant one for easier debugging
+		var reason string
+		if len(authErrors) > 0 {
+			for svc, msg := range authErrors { // pick first
+				reason = fmt.Sprintf("%s: %s", svc, msg)
+				break
+			}
+		}
+		if reason == "" {
+			reason = "missing or invalid credentials"
+		}
+		err = fmt.Errorf("unauthorized Tool call: %s: %w", reason, tools.ErrUnauthorized)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 	}
 	logger.DebugContext(ctx, "tool invocation authorized")
@@ -166,17 +179,19 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	}
 	logger.DebugContext(ctx, fmt.Sprintf("invocation params: %s", params))
 
-	// Quota preflight: enforce only when quota endpoint is configured
+	// Quota preflight: enforce only when both endpoint is configured and enforcement is enabled
 	if qe := util.QuotaEndpointFromContext(ctx); qe != "" {
-		allowed, remaining, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
-		if qerr != nil {
-			return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, fmt.Sprintf("quota preflight failed: %s", qerr), nil), qerr
-		}
-		if !allowed {
-			if reason == "" {
-				reason = "row limit exceeded"
+		if enforce, ok := util.QuotaEnforcementFromContext(ctx); ok && enforce {
+			allowed, remaining, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
+			if qerr != nil {
+				return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, fmt.Sprintf("quota preflight failed: %s", qerr), nil), qerr
 			}
-			return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, fmt.Sprintf("quota denied: %s (remaining_rows=%d)", reason, remaining), nil), fmt.Errorf("quota denied: %s", reason)
+			if !allowed {
+				if reason == "" {
+					reason = "row limit exceeded"
+				}
+				return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, fmt.Sprintf("quota denied: %s (remaining_rows=%d)", reason, remaining), nil), fmt.Errorf("quota denied: %s", reason)
+			}
 		}
 	}
 

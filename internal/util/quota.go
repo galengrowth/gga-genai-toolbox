@@ -36,10 +36,18 @@ type QuotaCheckResponse struct {
 // Typed context key
 const (
 	quotaEndpointKey contextKey = "quotaEndpoint"
+	quotaEnforceKey  contextKey = "quotaEnforce"
 )
 
 func WithQuotaEndpoint(ctx context.Context, url string) context.Context {
 	return context.WithValue(ctx, quotaEndpointKey, url)
+}
+
+// WithQuotaEnforcement stores an optional override for quota enforcement.
+// Use a pointer so callers can distinguish "not set" vs explicit true/false.
+func WithQuotaEnforcement(ctx context.Context, enforce bool) context.Context {
+	// store as a plain bool; presence in context implies it's explicitly set
+	return context.WithValue(ctx, quotaEnforceKey, enforce)
 }
 
 func QuotaEndpointFromContext(ctx context.Context) string {
@@ -50,6 +58,18 @@ func QuotaEndpointFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+// QuotaEnforcementFromContext returns (value, isSet). If not set, callers should preserve default behavior.
+func QuotaEnforcementFromContext(ctx context.Context) (bool, bool) {
+	if v, ok := ctx.Value(quotaEnforceKey).(bool); ok {
+		return v, true
+	}
+	// legacy string-based boolean support
+	if v, ok := ctx.Value("requireQuotaPreflight").(bool); ok {
+		return v, true
+	}
+	return false, false
 }
 
 // No additional flags; presence of quotaEndpoint implies strict enforcement.

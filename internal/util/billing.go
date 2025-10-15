@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -26,6 +27,7 @@ const (
 	requestIDKey       contextKey = "requestID"
 	jwtClaimsKey       contextKey = "jwtClaims"
 	authHeaderKey      contextKey = "authorizationHeader"
+	billingEnforceKey  contextKey = "billingEnforce"
 )
 
 // WithBillingEndpoint stores the billing endpoint URL in context.
@@ -48,13 +50,28 @@ func WithAuthorizationHeader(ctx context.Context, authorization string) context.
 	return context.WithValue(ctx, authHeaderKey, authorization)
 }
 
+// WithBillingEnforcement sets whether billing POST must succeed to consider the operation successful.
+// Presence implies explicit setting.
+func WithBillingEnforcement(ctx context.Context, enforce bool) context.Context {
+	return context.WithValue(ctx, billingEnforceKey, enforce)
+}
+
 // package-scoped HTTP client with a sane timeout to avoid hangs.
 var billingHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query string) {
+	// Only perform billing when explicitly enabled via requireBillingPost=true
+	if enforce, ok := BillingEnforcementFromContext(ctx); !ok || !enforce {
+		return
+	}
 	billingURL := BillingEndpointFromContext(ctx)
 	if billingURL == "" {
 		return
+	}
+	// Determine if billing must succeed (default false)
+	enforceBilling := false
+	if v, ok := ctx.Value(billingEnforceKey).(bool); ok {
+		enforceBilling = v
 	}
 	sub, email := UserInfoFromContext(ctx)
 	reqID := RequestIDFromContext(ctx)
@@ -147,7 +164,13 @@ func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query str
 		resp, err := billingHTTPClient.Do(req)
 		if err != nil {
 			if logger != nil {
-				logger.ErrorContext(context.Background(), "billing: request failed", "error", err)
+				if enforceBilling {
+					logger.ErrorContext(context.Background(), "billing: request failed", "error", err)
+					// When enforcement is on, log a strong error to surface in ops; still async, so caller should perform sync check if needed.
+					logger.ErrorContext(context.Background(), "billing: enforced failure")
+				} else {
+					logger.WarnContext(context.Background(), "billing: request failed", "error", err)
+				}
 			}
 			return
 		}
@@ -169,8 +192,74 @@ func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query str
 					logger.WarnContext(context.Background(), "billing: non-success status", "status", resp.Status)
 				}
 			}
+			if enforceBilling {
+				logger.ErrorContext(context.Background(), "billing: enforced failure due to non-2xx status", "status", resp.Status)
+			}
 		}
 	}(billingURL, reqID, bi)
+}
+
+// PostBillingSync performs a synchronous billing POST and returns error on failure.
+// Intended for optional enforcement paths. Uses a short timeout and propagates transport/status errors.
+func PostBillingSync(ctx context.Context, billingURL, tool string, rowCount int, query string) error {
+	if billingURL == "" {
+		return nil
+	}
+	sub, email := UserInfoFromContext(ctx)
+	reqID := RequestIDFromContext(ctx)
+	payload := BillingInfo{
+		UserSub:   sub,
+		UserEmail: email,
+		Tool:      tool,
+		RowCount:  rowCount,
+		Query:     query,
+		RequestID: reqID,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	userAgent, _ := UserAgentFromContext(ctx)
+
+	reqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, billingURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if reqID != "" {
+		req.Header.Set("X-Request-ID", reqID)
+	}
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+	if auth := AuthorizationHeaderFromContext(ctx); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+
+	resp, err := billingHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// Read snippet for diagnostics
+	var snippet []byte
+	if resp.ContentLength != 0 {
+		snippet, _ = io.ReadAll(io.LimitReader(resp.Body, 2048))
+		io.Copy(io.Discard, resp.Body)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if len(snippet) > 0 {
+			return fmt.Errorf("billing non-success: %s, body: %s", resp.Status, string(snippet))
+		}
+		return fmt.Errorf("billing non-success: %s", resp.Status)
+	}
+	return nil
 }
 
 func BillingEndpointFromContext(ctx context.Context) string {
@@ -182,6 +271,17 @@ func BillingEndpointFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+// BillingEnforcementFromContext returns (value, isSet). If not set, callers should preserve default behavior.
+func BillingEnforcementFromContext(ctx context.Context) (bool, bool) {
+	if v, ok := ctx.Value(billingEnforceKey).(bool); ok {
+		return v, true
+	}
+	if v, ok := ctx.Value("requireBillingPost").(bool); ok {
+		return v, true
+	}
+	return false, false
 }
 
 func UserInfoFromContext(ctx context.Context) (sub, email string) {

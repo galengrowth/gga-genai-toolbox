@@ -189,10 +189,12 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	// Tool authentication
 	// claimsFromAuth maps the name of the authservice to the claims retrieved from it.
 	claimsFromAuth := make(map[string]map[string]any)
-	for _, aS := range s.ResourceMgr.GetAuthServiceMap() {
+	authErrors := make(map[string]string)
+	for name, aS := range s.ResourceMgr.GetAuthServiceMap() {
 		claims, err := aS.GetClaimsFromHeader(ctx, r.Header)
 		if err != nil {
-			s.logger.DebugContext(ctx, err.Error())
+			authErrors[name] = err.Error()
+			s.logger.DebugContext(ctx, fmt.Sprintf("auth service %s error: %s", name, err.Error()))
 			continue
 		}
 		if claims == nil {
@@ -222,7 +224,15 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	// Check if any of the specified auth services is verified
 	isAuthorized := tool.Authorized(verifiedAuthServices)
 	if !isAuthorized {
-		err = fmt.Errorf("tool invocation not authorized. Please make sure your specify correct auth headers")
+		// Surface first auth error if any, for easier debugging (e.g., expired token)
+		reason := "missing or invalid credentials"
+		if len(authErrors) > 0 {
+			for svc, msg := range authErrors { // pick first
+				reason = fmt.Sprintf("%s: %s", svc, msg)
+				break
+			}
+		}
+		err = fmt.Errorf("tool invocation not authorized: %s", reason)
 		s.logger.DebugContext(ctx, err.Error())
 		_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
 		return
@@ -253,23 +263,25 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.DebugContext(ctx, fmt.Sprintf("invocation params: %s", params))
 
-	// Quota preflight: when quotaEndpoint is configured, strictly enforce
+	// Quota preflight: enforce only when endpoint is configured and enforcement enabled
 	if qe := util.QuotaEndpointFromContext(ctx); qe != "" {
-		allowed, remaining, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
-		if qerr != nil {
-			msg := fmt.Errorf("quota preflight failed: %s", qerr)
-			s.logger.ErrorContext(ctx, msg.Error())
-			_ = render.Render(w, r, newErrResponse(msg, http.StatusServiceUnavailable))
-			return
-		}
-		if !allowed {
-			if reason == "" {
-				reason = "row limit exceeded"
+		if enforce, ok := util.QuotaEnforcementFromContext(ctx); ok && enforce {
+			allowed, remaining, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
+			if qerr != nil {
+				msg := fmt.Errorf("quota preflight failed: %s", qerr)
+				s.logger.ErrorContext(ctx, msg.Error())
+				_ = render.Render(w, r, newErrResponse(msg, http.StatusServiceUnavailable))
+				return
 			}
-			err = fmt.Errorf("quota denied: %s (remaining_rows=%d)", reason, remaining)
-			s.logger.DebugContext(ctx, err.Error())
-			_ = render.Render(w, r, newErrResponse(err, http.StatusTooManyRequests))
-			return
+			if !allowed {
+				if reason == "" {
+					reason = "row limit exceeded"
+				}
+				err = fmt.Errorf("quota denied: %s (remaining_rows=%d)", reason, remaining)
+				s.logger.DebugContext(ctx, err.Error())
+				_ = render.Render(w, r, newErrResponse(err, http.StatusTooManyRequests))
+				return
+			}
 		}
 	}
 
@@ -306,6 +318,8 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		_ = render.Render(w, r, newErrResponse(err, http.StatusBadRequest))
 		return
 	}
+
+	// No synchronous billing enforcement; billing (if enabled) happens asynchronously inside tools via util.LogAndPostBilling
 
 	resMarshal, err := json.Marshal(res)
 	if err != nil {
