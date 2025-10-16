@@ -20,7 +20,7 @@ steps:
       - 'run'
       - 'deploy'
       - 'genai-toolbox'
-      - '--set-secrets "/app/tools.yaml=tools:latest" \'
+      - '--set-secrets=/app/tools.yaml=tools:latest'
       - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
       - '--region=us-central1'
       - '--platform=managed'
