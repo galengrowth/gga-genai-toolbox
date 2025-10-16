@@ -13,7 +13,8 @@
 # limitations under the License.
 
 # Use the latest stable golang 1.x to compile to a binary
-FROM --platform=$BUILDPLATFORM golang:1 AS build
+FROM golang:1 AS build
+
 
 WORKDIR /go/src/genai-toolbox
 COPY . .
