@@ -27,7 +27,7 @@ steps:
       - '--service-account=toolbox-identity'
       - '--set-secrets=tools.yaml=tools:latest'
       - '--command=/bin/sh'
-      - '--args=-c, genai-toolbox --tools-file=/app/tools.yaml --address=0.0.0.0 --port=$PORT'
+      - '--args=-c, genai-toolbox --tools-file=/app/tools.yaml --address=0.0.0.0 --port=8080'
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
