@@ -1,17 +1,17 @@
 steps:
   # 1️⃣ Build the Docker image
-  #- name: 'gcr.io/cloud-builders/docker'
-  #  args:
-  #    - 'build'
-  #    - '-t'
-  #    - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
-  #    - '.'
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
+      - '.'
 
   # 2️⃣ Push to Artifact Registry
-  #- name: 'gcr.io/cloud-builders/docker'
-  #  args:
-  #    - 'push'
-  #    - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
 
   # 3️⃣ Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -20,7 +20,7 @@ steps:
       - 'run'
       - 'deploy'
       - 'toolbox'
-      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:8b238d5' # $SHORT_SHA'
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
       - '--region=us-central1'
       - '--platform=managed'
       - '--allow-unauthenticated'

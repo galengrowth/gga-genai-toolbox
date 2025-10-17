@@ -35,4 +35,6 @@ WORKDIR /app
 COPY --from=build --chown=nonroot /go/src/genai-toolbox/genai-toolbox /toolbox
 USER nonroot
 
-ENTRYPOINT ["/toolbox"] 
+#ENTRYPOINT ["/toolbox"] 
+# Cloud Run expects the service to listen on 0.0.0.0:$PORT
+ENTRYPOINT ["/toolbox", "--address=0.0.0.0", "--port=${PORT}", "--tools-file=/app/tools.yaml"]
