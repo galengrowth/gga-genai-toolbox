@@ -830,7 +830,6 @@ toolsets:
         - my_second_tool
         - my_third_tool
 ```
-
 ### Auth Services
 
 The `authServices` section defines authentication methods for securing tools. Currently supported: `authzero` (OIDC/JWT via Auth0) and `hta` (custom HTTP endpoint validation).
