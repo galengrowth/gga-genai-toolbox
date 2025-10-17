@@ -25,8 +25,7 @@ steps:
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--service-account=toolbox-identity'
-      - '--set-secrets=tools.yaml=tools:latest'
-      - '--command=/bin/sh'
+      - '--set-secrets=/app/tools.yaml=tools:latest'
       - '--args=-c, genai-toolbox --tools-file=/app/tools.yaml --address=0.0.0.0 --port=8080'
 
 images:
