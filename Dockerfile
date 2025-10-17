@@ -37,4 +37,4 @@ USER nonroot
 
 #ENTRYPOINT ["/toolbox"] 
 # Cloud Run expects the service to listen on 0.0.0.0:$PORT
-ENTRYPOINT ["/toolbox", "--address=0.0.0.0", "--port=${PORT}", "--tools-file=/app/tools.yaml"]
+ENTRYPOINT ["/toolbox", "--address=0.0.0.0", "--port=8080", "--tools-file=/app/tools.yaml"]
