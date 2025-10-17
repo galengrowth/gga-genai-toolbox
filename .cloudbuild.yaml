@@ -19,12 +19,15 @@ steps:
     args:
       - 'run'
       - 'deploy'
-      - 'genai-toolbox'
-      - '--set-secrets=/app/tools.yaml=tools:latest'
+      - 'toolbox'
       - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
       - '--region=us-central1'
       - '--platform=managed'
       - '--allow-unauthenticated'
+      - '--service-account=toolbox-identity'
+      - '--set-secrets=tools.yaml=tools:latest'
+      - '--command=/bin/sh'
+      - '--args=-c, genai-toolbox --tools-file=/app/tools.yaml --address=0.0.0.0 --port=$PORT'
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
