@@ -89,7 +89,12 @@ type Source struct {
 	Name     string `yaml:"name"`
 	Kind     string `yaml:"kind"`
 	Pool     *sql.DB
-	Database string // Add database field
+	Database string `yaml:"database"`
+}
+
+// DatabaseName returns the configured database name for this source.
+func (s *Source) DatabaseName() string {
+	return s.Database
 }
 
 func (s *Source) SourceKind() string {
@@ -100,24 +105,13 @@ func (s *Source) MySQLPool() *sql.DB {
 	return s.Pool
 }
 
-func (s *Source) DatabaseName() string {
-	return s.Database
-}
-
 func initMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, host, port, user, pass, dbname, queryTimeout string, queryParams map[string]string) (*sql.DB, error) {
 	//nolint:all // Reassigned ctx
 	ctx, span := sources.InitConnectionSpan(ctx, tracer, SourceKind, name)
 	defer span.End()
 
-	userAgent, err := util.UserAgentFromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	// Build query parameters via url.Values for deterministic order and proper escaping.
 	values := url.Values{}
-	values.Set("parseTime", "true")
-	values.Set("connectionAttributes", "program_name:"+userAgent)
 
 	// Derive readTimeout from queryTimeout when provided.
 	if queryTimeout != "" {
@@ -136,7 +130,14 @@ func initMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, hos
 		values.Set(k, v)
 	}
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?%s", user, pass, host, port, dbname, values.Encode())
+	userAgent, err := util.UserAgentFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&connectionAttributes=program_name:%s", user, pass, host, port, dbname, url.QueryEscape(userAgent))
+	if enc := values.Encode(); enc != "" {
+		dsn += "&" + enc
+	}
 
 	// Interact with the driver directly as you normally would
 	pool, err := sql.Open("mysql", dsn)
