@@ -266,7 +266,7 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	// Quota preflight: enforce only when endpoint is configured and enforcement enabled
 	if qe := util.QuotaEndpointFromContext(ctx); qe != "" {
 		if enforce, ok := util.QuotaEnforcementFromContext(ctx); ok && enforce {
-			allowed, remaining, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
+			allowed, _, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
 			if qerr != nil {
 				msg := fmt.Errorf("quota preflight failed: %s", qerr)
 				s.logger.ErrorContext(ctx, msg.Error())
@@ -277,7 +277,7 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 				if reason == "" {
 					reason = "row limit exceeded"
 				}
-				err = fmt.Errorf("quota denied: %s (remaining_rows=%d)", reason, remaining)
+				err = fmt.Errorf("Insufficient tokens")
 				s.logger.DebugContext(ctx, err.Error())
 				_ = render.Render(w, r, newErrResponse(err, http.StatusTooManyRequests))
 				return

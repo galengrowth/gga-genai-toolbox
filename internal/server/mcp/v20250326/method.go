@@ -177,7 +177,7 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	// Quota preflight: enforce only when endpoint is configured and enforcement enabled
 	if qe := util.QuotaEndpointFromContext(ctx); qe != "" {
 		if enforce, ok := util.QuotaEnforcementFromContext(ctx); ok && enforce {
-			allowed, remaining, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
+			allowed, _, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
 			if qerr != nil {
 				return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, fmt.Sprintf("quota preflight failed: %s", qerr), nil), qerr
 			}
@@ -185,7 +185,7 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 				if reason == "" {
 					reason = "row limit exceeded"
 				}
-				return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, fmt.Sprintf("quota denied: %s (remaining_rows=%d)", reason, remaining), nil), fmt.Errorf("quota denied: %s", reason)
+				return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, "Insufficient tokens", nil), fmt.Errorf("Insufficient tokens")
 			}
 		}
 	}

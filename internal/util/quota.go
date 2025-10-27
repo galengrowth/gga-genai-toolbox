@@ -75,7 +75,7 @@ func QuotaEnforcementFromContext(ctx context.Context) (bool, bool) {
 // No additional flags; presence of quotaEndpoint implies strict enforcement.
 
 // Shared HTTP client for quota checks
-var quotaHTTPClient = &http.Client{Timeout: 5 * time.Second}
+var quotaHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 // CheckQuotaAndAuthorize returns (allowed, remainingRows, reason, err).
 // - err is for transport/parse issues; when err != nil, the caller can decide to allow based on AllowOnQuotaError.

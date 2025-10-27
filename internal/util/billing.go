@@ -57,7 +57,7 @@ func WithBillingEnforcement(ctx context.Context, enforce bool) context.Context {
 }
 
 // package-scoped HTTP client with a sane timeout to avoid hangs.
-var billingHTTPClient = &http.Client{Timeout: 5 * time.Second}
+var billingHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query string) {
 	// Only perform billing when explicitly enabled via requireBillingPost=true
