@@ -177,14 +177,11 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	// Quota preflight: enforce only when endpoint is configured and enforcement enabled
 	if qe := util.QuotaEndpointFromContext(ctx); qe != "" {
 		if enforce, ok := util.QuotaEnforcementFromContext(ctx); ok && enforce {
-			allowed, _, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
+			allowed, _, _, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
 			if qerr != nil {
 				return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, fmt.Sprintf("quota preflight failed: %s", qerr), nil), qerr
 			}
 			if !allowed {
-				if reason == "" {
-					reason = "row limit exceeded"
-				}
 				return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, "Insufficient tokens", nil), fmt.Errorf("Insufficient tokens")
 			}
 		}

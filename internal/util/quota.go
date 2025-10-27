@@ -13,11 +13,10 @@ import (
 
 // Quota preflight contract
 // Request: { user_sub, user_email, tool, requested_rows?, request_id, timestamp }
-// Response on success (200/204): { remaining_rows: int, reason?: string }
-//  - remaining_rows == -1 => unlimited; treat as allowed
-//  - remaining_rows > 0    => allowed
-//  - remaining_rows == 0   => denied
-// Error statuses like 429/403 should include { remaining_rows, reason } when possible
+// Response on success (200/204): { allowed: bool, reason?: string }
+//  - allowed == true => allowed
+//  - allowed == false => denied
+// Error statuses like 429/403 should include { allowed, reason } when possible
 
 type QuotaCheckRequest struct {
 	UserSub       string `json:"user_sub,omitempty"`
@@ -29,8 +28,8 @@ type QuotaCheckRequest struct {
 }
 
 type QuotaCheckResponse struct {
-	RemainingRows int    `json:"remaining_rows"`
-	Reason        string `json:"reason,omitempty"`
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // Typed context key
@@ -173,28 +172,32 @@ func CheckQuotaAndAuthorize(ctx context.Context, tool string, requestedRows *int
 	}
 
 	// Parse response JSON if available
-	parseRemaining := func(b []byte) (int, string) {
+	parseAllowed := func(b []byte) (bool, string) {
 		var q QuotaCheckResponse
 		if len(b) == 0 {
-			return 0, ""
+			return false, ""
 		}
 		if err := json.Unmarshal(b, &q); err != nil {
-			return 0, string(b)
+			return false, string(b)
 		}
-		return q.RemainingRows, q.Reason
+		return q.Allowed, q.Reason
 	}
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		remaining, reason := parseRemaining(bodySnippet)
-		if remaining == -1 || remaining > 0 {
-			return true, remaining, reason, nil
+		allowed, reason := parseAllowed(bodySnippet)
+		remaining := 0
+		if allowed {
+			remaining = -1
 		}
-		// If API returns 200 with 0, treat as denied but not an error
-		return false, remaining, reason, nil
+		return allowed, remaining, reason, nil
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden:
-		remaining, reason := parseRemaining(bodySnippet)
-		return false, remaining, reason, nil
+		allowed, reason := parseAllowed(bodySnippet)
+		remaining := 0
+		if allowed {
+			remaining = -1
+		}
+		return allowed, remaining, reason, nil
 	default:
 		// Other server/client errors → return transport error for caller policy
 		msg := fmt.Sprintf("quota unexpected status: %s", resp.Status)
