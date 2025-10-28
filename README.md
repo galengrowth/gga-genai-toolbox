@@ -1,4 +1,5 @@
 ![logo](./logo.png)
+
 # MCP Toolbox for Databases
 
 [![Docs](https://img.shields.io/badge/docs-MCP_Toolbox-blue)](https://googleapis.github.io/genai-toolbox/)
