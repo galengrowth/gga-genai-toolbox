@@ -48,15 +48,16 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (sources
 }
 
 type Config struct {
-	Name     string         `yaml:"name" validate:"required"`
-	Kind     string         `yaml:"kind" validate:"required"`
-	Project  string         `yaml:"project" validate:"required"`
-	Region   string         `yaml:"region" validate:"required"`
-	Instance string         `yaml:"instance" validate:"required"`
-	IPType   sources.IPType `yaml:"ipType"`
-	User     string         `yaml:"user" validate:"required"`
-	Password string         `yaml:"password" validate:"required"`
-	Database string         `yaml:"database" validate:"required"`
+	Name       string         `yaml:"name" validate:"required"`
+	Kind       string         `yaml:"kind" validate:"required"`
+	Project    string         `yaml:"project" validate:"required"`
+	Region     string         `yaml:"region" validate:"required"`
+	Instance   string         `yaml:"instance" validate:"required"`
+	IPType     sources.IPType `yaml:"ipType"`
+	User       string         `yaml:"user" validate:"required"`
+	Password   string         `yaml:"password" validate:"required"`
+	Database   string         `yaml:"database" validate:"required"`
+	IsCloudRun bool           `yaml:"isCloudRun"`
 }
 
 func (r Config) SourceConfigKind() string {
@@ -64,7 +65,7 @@ func (r Config) SourceConfigKind() string {
 }
 
 func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.Source, error) {
-	pool, err := initCloudSQLMySQLConnectionPool(ctx, tracer, r.Name, r.Project, r.Region, r.Instance, r.IPType.String(), r.User, r.Password, r.Database)
+	pool, err := initCloudSQLMySQLConnectionPool(ctx, tracer, r.Name, r.Project, r.Region, r.Instance, r.IPType.String(), r.User, r.Password, r.Database, r.IsCloudRun)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create pool: %w", err)
 	}
@@ -75,9 +76,10 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s := &Source{
-		Name: r.Name,
-		Kind: SourceKind,
-		Pool: pool,
+		Name:       r.Name,
+		Kind:       SourceKind,
+		Pool:       pool,
+		IsCloudRun: r.IsCloudRun,
 	}
 	return s, nil
 }
@@ -85,9 +87,10 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name string `yaml:"name"`
-	Kind string `yaml:"kind"`
-	Pool *sql.DB
+	Name       string `yaml:"name"`
+	Kind       string `yaml:"kind"`
+	Pool       *sql.DB
+	IsCloudRun bool `yaml:"isCloudRun"`
 }
 
 func (s *Source) SourceKind() string {
@@ -98,8 +101,7 @@ func (s *Source) MySQLPool() *sql.DB {
 	return s.Pool
 }
 
-func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, project, region, instance, ipType, user, pass, dbname string) (*sql.DB, error) {
-	//nolint:all // Reassigned ctx
+func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, project, region, instance, ipType, user, pass, dbname string, isCloudRun bool) (*sql.DB, error) {
 	ctx, span := sources.InitConnectionSpan(ctx, tracer, SourceKind, name)
 	defer span.End()
 
@@ -120,7 +122,13 @@ func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, n
 		}
 	}
 	// Tell the driver to use the Cloud SQL Go Connector to create connections
-	dsn := fmt.Sprintf("%s:%s@cloudsql-mysql(%s:%s:%s)/%s?connectionAttributes=program_name:%s", user, pass, project, region, instance, dbname, url.QueryEscape(userAgent))
+	var dsn string
+	if isCloudRun {
+		unixSocket := fmt.Sprintf("/cloudsql/%s:%s:%s", project, region, instance)
+		dsn = fmt.Sprintf("%s:%s@unix(%s)/%s?connectionAttributes=program_name:%s", user, pass, unixSocket, dbname, url.QueryEscape(userAgent))
+	} else {
+		dsn = fmt.Sprintf("%s:%s@cloudsql-mysql(%s:%s:%s)/%s?connectionAttributes=program_name:%s", user, pass, project, region, instance, dbname, url.QueryEscape(userAgent))
+	}
 	db, err := sql.Open(
 		"cloudsql-mysql",
 		dsn,

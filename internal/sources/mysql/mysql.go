@@ -57,6 +57,7 @@ type Config struct {
 	Database     string            `yaml:"database" validate:"required"`
 	QueryTimeout string            `yaml:"queryTimeout"`
 	QueryParams  map[string]string `yaml:"queryParams"`
+	IsCloudRun   bool              `yaml:"isCloudRun"`
 }
 
 func (r Config) SourceConfigKind() string {
@@ -64,7 +65,7 @@ func (r Config) SourceConfigKind() string {
 }
 
 func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.Source, error) {
-	pool, err := initMySQLConnectionPool(ctx, tracer, r.Name, r.Host, r.Port, r.User, r.Password, r.Database, r.QueryTimeout, r.QueryParams)
+	pool, err := initMySQLConnectionPool(ctx, tracer, r.Name, r.Host, r.Port, r.User, r.Password, r.Database, r.QueryTimeout, r.QueryParams, r.IsCloudRun)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create pool: %w", err)
 	}
@@ -75,10 +76,11 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s := &Source{
-		Name:     r.Name,
-		Kind:     SourceKind,
-		Pool:     pool,
-		Database: r.Database,
+		Name:       r.Name,
+		Kind:       SourceKind,
+		Pool:       pool,
+		Database:   r.Database,
+		IsCloudRun: r.IsCloudRun,
 	}
 	return s, nil
 }
@@ -86,10 +88,11 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name     string `yaml:"name"`
-	Kind     string `yaml:"kind"`
-	Pool     *sql.DB
-	Database string `yaml:"database"`
+	Name       string `yaml:"name"`
+	Kind       string `yaml:"kind"`
+	Pool       *sql.DB
+	Database   string `yaml:"database"`
+	IsCloudRun bool   `yaml:"isCloudRun"`
 }
 
 // DatabaseName returns the configured database name for this source.
@@ -105,7 +108,7 @@ func (s *Source) MySQLPool() *sql.DB {
 	return s.Pool
 }
 
-func initMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, host, port, user, pass, dbname, queryTimeout string, queryParams map[string]string) (*sql.DB, error) {
+func initMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, host, port, user, pass, dbname, queryTimeout string, queryParams map[string]string, isCloudRun bool) (*sql.DB, error) {
 	//nolint:all // Reassigned ctx
 	ctx, span := sources.InitConnectionSpan(ctx, tracer, SourceKind, name)
 	defer span.End()
@@ -134,7 +137,13 @@ func initMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, hos
 	if err != nil {
 		return nil, err
 	}
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&connectionAttributes=program_name:%s", user, pass, host, port, dbname, url.QueryEscape(userAgent))
+
+	var dsn string
+	if isCloudRun {
+		dsn = fmt.Sprintf("%s:%s@unix(%s)/%s?parseTime=true&connectionAttributes=program_name:%s", user, pass, host, dbname, url.QueryEscape(userAgent))
+	} else {
+		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&connectionAttributes=program_name:%s", user, pass, host, port, dbname, url.QueryEscape(userAgent))
+	}
 	if enc := values.Encode(); enc != "" {
 		dsn += "&" + enc
 	}
