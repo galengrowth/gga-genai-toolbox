@@ -20,13 +20,14 @@ steps:
     args:
       - 'run'
       - 'deploy'
-      - 'toolbox2'
+      - 'mcp-toolbox-dev'
       - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
       - '--region=us-central1'
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--service-account=toolbox-identity'
-      - '--set-secrets=/app/tools.yaml=tools:latest'
+      - '--set-secrets=/app/tools.yaml=tools-unix:latest'
+      - '--args=--tools-file=/app/tools.yaml,--address=0.0.0.0,--port=8080'
       - '--timeout=1200s' # ⏱️ extended timeout (15 minutes)
 
 images:
