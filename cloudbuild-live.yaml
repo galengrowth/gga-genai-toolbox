@@ -1,0 +1,35 @@
+steps:
+  # 1️⃣ Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
+      - '.'
+
+
+  # 2️⃣ Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
+
+  # 3️⃣ Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'mcp-toolbox-live'
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--service-account=toolbox-identity'
+      - '--set-secrets=/app/tools.yaml=mcp-toolbox-live:latest'
+      - '--args=--tools-file=/app/tools.yaml,--address=0.0.0.0,--port=8080'
+      - '--timeout=1200s' # ⏱️ extended timeout (15 minutes)
+
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/genai-toolbox-repo/genai-toolbox:$SHORT_SHA'
+
