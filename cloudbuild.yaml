@@ -1,0 +1,67 @@
+steps:
+  # Step 1: Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
+      - '.'
+
+  # Step 2: Tag with SHA for rollback capability
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'tag'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
+      #- 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
+
+  # Step 3: Push latest tag
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
+
+  # Step 4: Push SHA tag
+  #- name: 'gcr.io/cloud-builders/docker'
+  #  args:
+  #   - 'push'
+  #    - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
+
+  # Step 5: Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+
+        if [ "${BRANCH_NAME}" = "dev" ]; then
+          SERVICE_NAME="mcp-toolbox-dev"
+          SECRET_NAME="mcp-toolbox-dev"
+        elif [ "${BRANCH_NAME}" = "stage" ]; then
+          SERVICE_NAME="mcp-toolbox-stage"
+          SECRET_NAME="mcp-toolbox-stage"
+        elif [ "${BRANCH_NAME}" = "master" ]; then
+          SERVICE_NAME="mcp-toolbox-live"
+          SECRET_NAME="mcp-toolbox-live"
+        else
+          echo "ERROR: Unsupported branch ${BRANCH_NAME}"
+          exit 1
+        fi
+
+        echo "Deploying to Cloud Run service: $$SERVICE_NAME"
+        echo "Using secret: $$SECRET_NAME"
+
+        gcloud run deploy "$$SERVICE_NAME" \
+          --image "us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest" \
+          --region "us-central1" \
+          --platform "managed" \
+          --allow-unauthenticated \
+          --service-account "toolbox-identity@$PROJECT_ID.iam.gserviceaccount.com" \
+          --set-secrets "/app/tools.yaml=$$SECRET_NAME:latest" \
+          --timeout "1200s" \
+          --labels "branch=${BRANCH_NAME},commit=${SHORT_SHA}" \
+          --args="--tools-file=/app/tools.yaml,--address=0.0.0.0,--port=8080"
+
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
+  #- 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
