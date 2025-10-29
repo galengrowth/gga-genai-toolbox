@@ -21,14 +21,19 @@ steps:
       - 'mcp-toolbox'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
 
-  # Step 4: Push all tags
+  # Step 4: Push latest tag
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox'
-      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
 
-  # Step 5: Deploy to Cloud Run (conditional service name + secret mapping)
+  # Step 5: Push SHA tag
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
+
+  # Step 6: Deploy to Cloud Run (conditional service name + secret mapping)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
