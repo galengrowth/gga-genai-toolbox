@@ -75,9 +75,10 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s := &Source{
-		Name: r.Name,
-		Kind: SourceKind,
-		Pool: pool,
+		Name:     r.Name,
+		Kind:     SourceKind,
+		Pool:     pool,
+		Database: r.Database,
 	}
 	return s, nil
 }
@@ -85,9 +86,10 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name string `yaml:"name"`
-	Kind string `yaml:"kind"`
-	Pool *sql.DB
+	Name     string `yaml:"name"`
+	Kind     string `yaml:"kind"`
+	Pool     *sql.DB
+	Database string `yaml:"database"`
 }
 
 func (s *Source) SourceKind() string {
@@ -96,6 +98,13 @@ func (s *Source) SourceKind() string {
 
 func (s *Source) MySQLPool() *sql.DB {
 	return s.Pool
+}
+
+// DatabaseName returns the configured database name for this source.
+// This is used by tools (e.g., mysql-list-tables) that need to scope
+// queries to the database defined in the source configuration.
+func (s *Source) DatabaseName() string {
+	return s.Database
 }
 
 func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, project, region, instance, ipType, user, pass, dbname string) (*sql.DB, error) {
