@@ -4,36 +4,24 @@ steps:
     args:
       - 'build'
       - '-t'
-      - 'mcp-toolbox'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
       - '.'
 
-  # Step 2: Tag with branch-latest for deployment
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'tag'
-      - 'mcp-toolbox'
-      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
-
-  # Step 3: Tag with branch-SHA for rollback capability
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'tag'
-      - 'mcp-toolbox'
-      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
-
-  # Step 4: Push latest tag
+  # Step 2: Push latest tag
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
 
-  # Step 5: Push SHA tag
+  # Step 3: Push SHA tag
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
 
-  # Step 6: Deploy to Cloud Run (conditional service name + secret mapping)
+  # Step 4: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
@@ -41,7 +29,6 @@ steps:
       - |
         set -e
 
-        # Map branch to service and secret names
         if [ "${BRANCH_NAME}" = "dev" ]; then
           SERVICE_NAME="mcp-toolbox-dev"
           SECRET_NAME="mcp-toolbox-dev"
@@ -58,7 +45,6 @@ steps:
 
         echo "Deploying to Cloud Run service: $$SERVICE_NAME"
         echo "Using secret: $$SECRET_NAME"
-        echo "Branch: ${BRANCH_NAME}, SHA: ${SHORT_SHA}"
 
         gcloud run deploy "$$SERVICE_NAME" \
           --image "us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest" \
