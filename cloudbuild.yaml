@@ -5,8 +5,6 @@ steps:
       - 'build'
       - '-t'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
-      #- '-t'
-      #- 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
       - '.'
 
   # Step 2: Push latest tag
@@ -15,13 +13,7 @@ steps:
       - 'push'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
 
-  # Step 3: Push SHA tag
-  #- name: 'gcr.io/cloud-builders/docker'
-  #  args:
-  #    - 'push'
-  #    - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-${SHORT_SHA}'
-
-  # Step 4: Deploy to Cloud Run
+  # Step 3: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
@@ -53,9 +45,9 @@ steps:
           --allow-unauthenticated \
           --service-account "toolbox-identity@$PROJECT_ID.iam.gserviceaccount.com" \
           --set-secrets "/app/tools.yaml=$$SECRET_NAME:latest" \
-          --args "--tools-file=/app/tools.yaml,--address=0.0.0.0,--port=8080" \
           --timeout "1200s" \
-          --labels "branch=${BRANCH_NAME},commit=${SHORT_SHA}"
+          --labels "branch=${BRANCH_NAME},commit=${SHORT_SHA}" \
+          --args="--tools-file=/app/tools.yaml,--address=0.0.0.0,--port=8080"
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'
