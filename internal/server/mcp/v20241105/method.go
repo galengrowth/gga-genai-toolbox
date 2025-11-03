@@ -59,33 +59,11 @@ func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, toolset tools.T
 		err = fmt.Errorf("invalid mcp tools list request: %w", err)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 	}
-
-	// Enforce authentication for tool discovery (parity with /api discovery)
-	claimsFromAuth := make(map[string]map[string]any)
-	authErrors := make(map[string]string)
-	if header != nil {
-		for name, aS := range authServices {
-			claims, err := aS.GetClaimsFromHeader(ctx, header)
-			if err != nil {
-				authErrors[name] = err.Error()
-				continue
-			}
-			if claims == nil {
-				continue
-			}
-			claimsFromAuth[aS.GetName()] = claims
+	// Discovery is intentionally unauthenticated. Log presence of Authorization header for debugging.
+	if header != nil && header.Get("Authorization") != "" {
+		if logger, err := util.LoggerFromContext(ctx); err == nil {
+			logger.DebugContext(ctx, "Authorization header present on MCP tools.list request")
 		}
-	}
-	if len(claimsFromAuth) == 0 {
-		reason := "missing or invalid credentials"
-		if len(authErrors) > 0 {
-			for svc, msg := range authErrors {
-				reason = fmt.Sprintf("%s: %s", svc, msg)
-				break
-			}
-		}
-		err := fmt.Errorf("unauthorized tools discovery: %s", reason)
-		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 	}
 
 	result := ListToolsResult{
