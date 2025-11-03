@@ -35,7 +35,7 @@ func ProcessMethod(ctx context.Context, id jsonrpc.RequestId, method string, too
 	case PING:
 		return pingHandler(id)
 	case TOOLS_LIST:
-		return toolsListHandler(id, toolset, body)
+		return toolsListHandler(ctx, id, toolset, authServices, header, body)
 	case TOOLS_CALL:
 		return toolsCallHandler(ctx, id, tools, authServices, body, header)
 	default:
@@ -53,10 +53,38 @@ func pingHandler(id jsonrpc.RequestId) (any, error) {
 	}, nil
 }
 
-func toolsListHandler(id jsonrpc.RequestId, toolset tools.Toolset, body []byte) (any, error) {
+func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, toolset tools.Toolset, authServices map[string]auth.AuthService, header http.Header, body []byte) (any, error) {
 	var req ListToolsRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		err = fmt.Errorf("invalid mcp tools list request: %w", err)
+		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
+	}
+
+	// Enforce authentication for tool discovery (parity with /api discovery)
+	claimsFromAuth := make(map[string]map[string]any)
+	authErrors := make(map[string]string)
+	if header != nil {
+		for name, aS := range authServices {
+			claims, err := aS.GetClaimsFromHeader(ctx, header)
+			if err != nil {
+				authErrors[name] = err.Error()
+				continue
+			}
+			if claims == nil {
+				continue
+			}
+			claimsFromAuth[aS.GetName()] = claims
+		}
+	}
+	if len(claimsFromAuth) == 0 {
+		reason := "missing or invalid credentials"
+		if len(authErrors) > 0 {
+			for svc, msg := range authErrors {
+				reason = fmt.Sprintf("%s: %s", svc, msg)
+				break
+			}
+		}
+		err := fmt.Errorf("unauthorized tools discovery: %s", reason)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 	}
 
@@ -87,6 +115,7 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	toolName := req.Params.Name
 	toolArgument := req.Params.Arguments
 	logger.DebugContext(ctx, fmt.Sprintf("tool name: %s", toolName))
+	logger.DebugContext(ctx, fmt.Sprintf("raw argument type: %T", toolArgument))
 	tool, ok := toolsMap[toolName]
 	if !ok {
 		err = fmt.Errorf("invalid tool name: tool with name %q does not exist", toolName)
@@ -119,8 +148,27 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 
 	var data map[string]any
 	if err = util.DecodeJSON(bytes.NewBuffer(aMarshal), &data); err != nil {
-		err = fmt.Errorf("unable to decode tools argument: %w", err)
-		return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
+		// Fallback 1: some clients send an array of {name, value}
+		var arr []map[string]any
+		if err2 := util.DecodeJSON(bytes.NewBuffer(aMarshal), &arr); err2 == nil {
+			flattened := make(map[string]any)
+			for _, item := range arr {
+				name, hasName := item["name"].(string)
+				if !hasName {
+					continue
+				}
+				if val, ok := item["value"]; ok {
+					flattened[name] = val
+				}
+			}
+			data = flattened
+		} else if bytes.Equal(bytes.TrimSpace(aMarshal), []byte("null")) || len(bytes.TrimSpace(aMarshal)) == 0 {
+			// Fallback 2: null/empty arguments -> use defaults
+			data = map[string]any{}
+		} else {
+			err = fmt.Errorf("unable to decode tools argument: %v (raw type %T)", err, req.Params.Arguments)
+			return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, err.Error(), nil), err
+		}
 	}
 
 	// Tool authentication

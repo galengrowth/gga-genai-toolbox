@@ -35,7 +35,7 @@ func ProcessMethod(ctx context.Context, id jsonrpc.RequestId, method string, too
 	case PING:
 		return pingHandler(id)
 	case TOOLS_LIST:
-		return toolsListHandler(id, toolset, body)
+		return toolsListHandler(ctx, id, toolset, authServices, header, body)
 	case TOOLS_CALL:
 		return toolsCallHandler(ctx, id, tools, authServices, body, header)
 	default:
@@ -53,10 +53,38 @@ func pingHandler(id jsonrpc.RequestId) (any, error) {
 	}, nil
 }
 
-func toolsListHandler(id jsonrpc.RequestId, toolset tools.Toolset, body []byte) (any, error) {
+func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, toolset tools.Toolset, authServices map[string]auth.AuthService, header http.Header, body []byte) (any, error) {
 	var req ListToolsRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		err = fmt.Errorf("invalid mcp tools list request: %w", err)
+		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
+	}
+
+	// Enforce authentication for tool discovery (parity with /api discovery)
+	claimsFromAuth := make(map[string]map[string]any)
+	authErrors := make(map[string]string)
+	if header != nil {
+		for name, aS := range authServices {
+			claims, err := aS.GetClaimsFromHeader(ctx, header)
+			if err != nil {
+				authErrors[name] = err.Error()
+				continue
+			}
+			if claims == nil {
+				continue
+			}
+			claimsFromAuth[aS.GetName()] = claims
+		}
+	}
+	if len(claimsFromAuth) == 0 {
+		reason := "missing or invalid credentials"
+		if len(authErrors) > 0 {
+			for svc, msg := range authErrors {
+				reason = fmt.Sprintf("%s: %s", svc, msg)
+				break
+			}
+		}
+		err := fmt.Errorf("unauthorized tools discovery: %s", reason)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 	}
 

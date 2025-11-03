@@ -77,6 +77,41 @@ func toolsetHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		)
 	}()
 
+	// Secure toolset discovery: require valid token and authorization
+	// ...existing code...
+	claimsFromAuth := make(map[string]map[string]any)
+	authErrors := make(map[string]string)
+	for name, aS := range s.ResourceMgr.GetAuthServiceMap() {
+		claims, err := aS.GetClaimsFromHeader(ctx, r.Header)
+		if err != nil {
+			authErrors[name] = err.Error()
+			s.logger.DebugContext(ctx, fmt.Sprintf("auth service %s error: %s", name, err.Error()))
+			continue
+		}
+		if claims == nil {
+			continue
+		}
+		claimsFromAuth[aS.GetName()] = claims
+	}
+	verifiedAuthServices := make([]string, len(claimsFromAuth))
+	i := 0
+	for k := range claimsFromAuth {
+		verifiedAuthServices[i] = k
+		i++
+	}
+	if len(verifiedAuthServices) == 0 {
+		reason := "missing or invalid credentials"
+		if len(authErrors) > 0 {
+			for svc, msg := range authErrors {
+				reason = fmt.Sprintf("%s: %s", svc, msg)
+				break
+			}
+		}
+		err = fmt.Errorf("toolset discovery not authorized: %s", reason)
+		s.logger.DebugContext(ctx, err.Error())
+		_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
+		return
+	}
 	toolset, ok := s.ResourceMgr.GetToolset(toolsetName)
 	if !ok {
 		err = fmt.Errorf("toolset %q does not exist", toolsetName)
@@ -113,6 +148,41 @@ func toolGetHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			metric.WithAttributes(attribute.String("toolbox.operation.status", status)),
 		)
 	}()
+	// Secure tool discovery: require valid token and authorization
+	// ...existing code...
+	claimsFromAuth := make(map[string]map[string]any)
+	authErrors := make(map[string]string)
+	for name, aS := range s.ResourceMgr.GetAuthServiceMap() {
+		claims, err := aS.GetClaimsFromHeader(ctx, r.Header)
+		if err != nil {
+			authErrors[name] = err.Error()
+			s.logger.DebugContext(ctx, fmt.Sprintf("auth service %s error: %s", name, err.Error()))
+			continue
+		}
+		if claims == nil {
+			continue
+		}
+		claimsFromAuth[aS.GetName()] = claims
+	}
+	verifiedAuthServices := make([]string, len(claimsFromAuth))
+	i := 0
+	for k := range claimsFromAuth {
+		verifiedAuthServices[i] = k
+		i++
+	}
+	if len(verifiedAuthServices) == 0 {
+		reason := "missing or invalid credentials"
+		if len(authErrors) > 0 {
+			for svc, msg := range authErrors {
+				reason = fmt.Sprintf("%s: %s", svc, msg)
+				break
+			}
+		}
+		err = fmt.Errorf("tool discovery not authorized: %s", reason)
+		s.logger.DebugContext(ctx, err.Error())
+		_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
+		return
+	}
 	tool, ok := s.ResourceMgr.GetTool(toolName)
 	if !ok {
 		err = fmt.Errorf("invalid tool name: tool with name %q does not exist", toolName)
