@@ -78,8 +78,12 @@ func newService(t *testing.T, jwksJSON []byte, allowed []string) *AuthService {
 		allowed = []string{"RS256"}
 	}
 	return &AuthService{
-		Name:        "test",
-		Kind:        AuthServiceKind,
+		Config: Config{
+			Name:     "test",
+			Kind:     AuthServiceKind,
+			Domain:   "tenant.example.com",
+			Audience: "https://api.example.com",
+		},
 		Domain:      "tenant.example.com",
 		Audience:    "https://api.example.com",
 		JWKS:        jwks,

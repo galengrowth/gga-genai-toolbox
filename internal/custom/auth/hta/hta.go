@@ -61,8 +61,7 @@ func (cfg Config) Initialize() (auth.AuthService, error) {
 		}
 	}
 	return &AuthService{
-		name:         cfg.Name,
-		kind:         AuthServiceKind,
+		Config:       cfg,
 		authEndpoint: cfg.AuthEndpoint,
 		timeout:      to,
 		client:       &http.Client{Timeout: to},
@@ -73,18 +72,22 @@ var _ auth.AuthService = (*AuthService)(nil)
 
 // AuthService stores AuthZero/JWT validation info.
 type AuthService struct {
-	name         string
-	kind         string
+	Config
 	authEndpoint string
 	timeout      time.Duration
 	client       *http.Client
 }
 
 // Returns the auth service kind
-func (a *AuthService) AuthServiceKind() string { return a.kind }
+func (a *AuthService) AuthServiceKind() string { return AuthServiceKind }
 
 // Returns the name of the auth service
-func (a *AuthService) GetName() string { return a.name }
+func (a *AuthService) GetName() string { return a.Name }
+
+// ToConfig returns the configuration for this auth service.
+func (a *AuthService) ToConfig() auth.AuthServiceConfig {
+	return a.Config
+}
 
 // Validates "Authorization: Bearer <token>" JWT, returning claims map if valid.
 func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (map[string]any, error) {

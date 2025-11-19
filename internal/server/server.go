@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/go-chi/httplog/v2"
 	"github.com/googleapis/genai-toolbox/internal/auth"
 	"github.com/googleapis/genai-toolbox/internal/log"
+	"github.com/googleapis/genai-toolbox/internal/prompts"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/telemetry"
 	"github.com/googleapis/genai-toolbox/internal/tools"
@@ -56,12 +58,16 @@ type ResourceManager struct {
 	authServices map[string]auth.AuthService
 	tools        map[string]tools.Tool
 	toolsets     map[string]tools.Toolset
+	prompts      map[string]prompts.Prompt
+	promptsets   map[string]prompts.Promptset
 }
 
 func NewResourceManager(
 	sourcesMap map[string]sources.Source,
 	authServicesMap map[string]auth.AuthService,
 	toolsMap map[string]tools.Tool, toolsetsMap map[string]tools.Toolset,
+	promptsMap map[string]prompts.Prompt, promptsetsMap map[string]prompts.Promptset,
+
 ) *ResourceManager {
 	resourceMgr := &ResourceManager{
 		mu:           sync.RWMutex{},
@@ -69,6 +75,8 @@ func NewResourceManager(
 		authServices: authServicesMap,
 		tools:        toolsMap,
 		toolsets:     toolsetsMap,
+		prompts:      promptsMap,
+		promptsets:   promptsetsMap,
 	}
 
 	return resourceMgr
@@ -102,13 +110,29 @@ func (r *ResourceManager) GetToolset(toolsetName string) (tools.Toolset, bool) {
 	return toolset, ok
 }
 
-func (r *ResourceManager) SetResources(sourcesMap map[string]sources.Source, authServicesMap map[string]auth.AuthService, toolsMap map[string]tools.Tool, toolsetsMap map[string]tools.Toolset) {
+func (r *ResourceManager) GetPrompt(promptName string) (prompts.Prompt, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	prompt, ok := r.prompts[promptName]
+	return prompt, ok
+}
+
+func (r *ResourceManager) GetPromptset(promptsetName string) (prompts.Promptset, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	promptset, ok := r.promptsets[promptsetName]
+	return promptset, ok
+}
+
+func (r *ResourceManager) SetResources(sourcesMap map[string]sources.Source, authServicesMap map[string]auth.AuthService, toolsMap map[string]tools.Tool, toolsetsMap map[string]tools.Toolset, promptsMap map[string]prompts.Prompt, promptsetsMap map[string]prompts.Promptset) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sources = sourcesMap
 	r.authServices = authServicesMap
 	r.tools = toolsMap
 	r.toolsets = toolsetsMap
+	r.prompts = promptsMap
+	r.promptsets = promptsetsMap
 }
 
 func (r *ResourceManager) GetAuthServiceMap() map[string]auth.AuthService {
@@ -123,11 +147,19 @@ func (r *ResourceManager) GetToolsMap() map[string]tools.Tool {
 	return r.tools
 }
 
+func (r *ResourceManager) GetPromptsMap() map[string]prompts.Prompt {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.prompts
+}
+
 func InitializeConfigs(ctx context.Context, cfg ServerConfig) (
 	map[string]sources.Source,
 	map[string]auth.AuthService,
 	map[string]tools.Tool,
 	map[string]tools.Toolset,
+	map[string]prompts.Prompt,
+	map[string]prompts.Promptset,
 	error,
 ) {
 	ctx = util.WithUserAgent(ctx, cfg.Version)
@@ -159,11 +191,15 @@ func InitializeConfigs(ctx context.Context, cfg ServerConfig) (
 			return s, nil
 		}()
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 		sourcesMap[name] = s
 	}
-	l.InfoContext(ctx, fmt.Sprintf("Initialized %d sources.", len(sourcesMap)))
+	sourceNames := make([]string, 0, len(sourcesMap))
+	for name := range sourcesMap {
+		sourceNames = append(sourceNames, name)
+	}
+	l.InfoContext(ctx, fmt.Sprintf("Initialized %d sources: %s", len(sourcesMap), strings.Join(sourceNames, ", ")))
 
 	// initialize and validate the auth services from configs
 	authServicesMap := make(map[string]auth.AuthService)
@@ -183,11 +219,15 @@ func InitializeConfigs(ctx context.Context, cfg ServerConfig) (
 			return a, nil
 		}()
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 		authServicesMap[name] = a
 	}
-	l.InfoContext(ctx, fmt.Sprintf("Initialized %d authServices.", len(authServicesMap)))
+	authServiceNames := make([]string, 0, len(authServicesMap))
+	for name := range authServicesMap {
+		authServiceNames = append(authServiceNames, name)
+	}
+	l.InfoContext(ctx, fmt.Sprintf("Initialized %d authServices: %s", len(authServicesMap), strings.Join(authServiceNames, ", ")))
 
 	// initialize and validate the tools from configs
 	toolsMap := make(map[string]tools.Tool)
@@ -207,11 +247,15 @@ func InitializeConfigs(ctx context.Context, cfg ServerConfig) (
 			return t, nil
 		}()
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 		toolsMap[name] = t
 	}
-	l.InfoContext(ctx, fmt.Sprintf("Initialized %d tools.", len(toolsMap)))
+	toolNames := make([]string, 0, len(toolsMap))
+	for name := range toolsMap {
+		toolNames = append(toolNames, name)
+	}
+	l.InfoContext(ctx, fmt.Sprintf("Initialized %d tools: %s", len(toolsMap), strings.Join(toolNames, ", ")))
 
 	// create a default toolset that contains all tools
 	allToolNames := make([]string, 0, len(toolsMap))
@@ -240,13 +284,90 @@ func InitializeConfigs(ctx context.Context, cfg ServerConfig) (
 			return t, err
 		}()
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 		toolsetsMap[name] = t
 	}
-	l.InfoContext(ctx, fmt.Sprintf("Initialized %d toolsets.", len(toolsetsMap)))
+	toolsetNames := make([]string, 0, len(toolsetsMap))
+	for name := range toolsetsMap {
+		if name == "" {
+			toolsetNames = append(toolsetNames, "default")
+		} else {
+			toolsetNames = append(toolsetNames, name)
+		}
+	}
+	l.InfoContext(ctx, fmt.Sprintf("Initialized %d toolsets: %s", len(toolsetsMap), strings.Join(toolsetNames, ", ")))
 
-	return sourcesMap, authServicesMap, toolsMap, toolsetsMap, nil
+	// initialize and validate the prompts from configs
+	promptsMap := make(map[string]prompts.Prompt)
+	for name, pc := range cfg.PromptConfigs {
+		p, err := func() (prompts.Prompt, error) {
+			_, span := instrumentation.Tracer.Start(
+				ctx,
+				"toolbox/server/prompt/init",
+				trace.WithAttributes(attribute.String("prompt_kind", pc.PromptConfigKind())),
+				trace.WithAttributes(attribute.String("prompt_name", name)),
+			)
+			defer span.End()
+			p, err := pc.Initialize()
+			if err != nil {
+				return nil, fmt.Errorf("unable to initialize prompt %q: %w", name, err)
+			}
+			return p, nil
+		}()
+		if err != nil {
+			return nil, nil, nil, nil, nil, nil, err
+		}
+		promptsMap[name] = p
+	}
+	promptNames := make([]string, 0, len(promptsMap))
+	for name := range promptsMap {
+		promptNames = append(promptNames, name)
+	}
+	l.InfoContext(ctx, fmt.Sprintf("Initialized %d prompts: %s", len(promptsMap), strings.Join(promptNames, ", ")))
+
+	// create a default promptset that contains all prompts
+	allPromptNames := make([]string, 0, len(promptsMap))
+	for name := range promptsMap {
+		allPromptNames = append(allPromptNames, name)
+	}
+	if cfg.PromptsetConfigs == nil {
+		cfg.PromptsetConfigs = make(PromptsetConfigs)
+	}
+	cfg.PromptsetConfigs[""] = prompts.PromptsetConfig{Name: "", PromptNames: allPromptNames}
+
+	// initialize and validate the promptsets from configs
+	promptsetsMap := make(map[string]prompts.Promptset)
+	for name, pc := range cfg.PromptsetConfigs {
+		p, err := func() (prompts.Promptset, error) {
+			_, span := instrumentation.Tracer.Start(
+				ctx,
+				"toolbox/server/prompset/init",
+				trace.WithAttributes(attribute.String("prompset_name", name)),
+			)
+			defer span.End()
+			p, err := pc.Initialize(cfg.Version, promptsMap)
+			if err != nil {
+				return prompts.Promptset{}, fmt.Errorf("unable to initialize promptset %q: %w", name, err)
+			}
+			return p, err
+		}()
+		if err != nil {
+			return nil, nil, nil, nil, nil, nil, err
+		}
+		promptsetsMap[name] = p
+	}
+	promptsetNames := make([]string, 0, len(promptsetsMap))
+	for name := range promptsetsMap {
+		if name == "" {
+			promptsetNames = append(promptsetNames, "default")
+		} else {
+			promptsetNames = append(promptsetNames, name)
+		}
+	}
+	l.InfoContext(ctx, fmt.Sprintf("Initialized %d promptsets: %s", len(promptsetsMap), strings.Join(promptsetNames, ", ")))
+
+	return sourcesMap, authServicesMap, toolsMap, toolsetsMap, promptsMap, promptsetsMap, nil
 }
 
 // NewServer returns a Server object based on provided Config.
@@ -300,56 +421,64 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	httpLogger := httplog.NewLogger("httplog", httpOpts)
 	r.Use(httplog.RequestLogger(httpLogger))
 
-	// Inject custom config like billing/quota endpoints into request contexts
-	if cfg.Custom != nil {
-		be, hasBE := cfg.Custom["billingEndpoint"].(string)
-		qe, hasQE := cfg.Custom["quotaEndpoint"].(string)
-		// Optional enforcement flags
-		reqBill, hasReqBill := cfg.Custom["requireBillingPost"].(bool)
-		reqQuota, hasReqQuota := cfg.Custom["requireQuotaPreflight"].(bool)
-		// Startup warnings to highlight configuration intent
-		if hasReqQuota && reqQuota && (!hasQE || qe == "") {
-			l.WarnContext(ctx, "quota enforcement requested but quotaEndpoint is not configured; preflight will be skipped")
-		}
-		if hasReqBill && reqBill && (!hasBE || be == "") {
-			l.WarnContext(ctx, "billing enforcement requested but billingEndpoint is not configured; billing will be skipped")
-		}
-		if hasBE && be != "" && (!hasReqBill) {
-			l.InfoContext(ctx, "billing endpoint configured. Set custom.requireBillingPost to true to enable billing POSTs; false (or unset) skips billing calls.")
-		}
-		if hasQE && qe != "" && (!hasReqQuota) {
-			l.InfoContext(ctx, "quota configured. Set custom.requireQuotaPreflight to true to enforce pre-execution checks or false to skip.")
-		}
-		if (hasBE && be != "") || (hasQE && qe != "") || hasReqBill || hasReqQuota {
-			r.Use(func(next http.Handler) http.Handler {
-				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					// attach endpoints and request id to request context (if provided)
-					ctxWith := r.Context()
-					if hasBE && be != "" {
-						ctxWith = util.WithBillingEndpoint(ctxWith, be)
-					}
-					if hasQE && qe != "" {
-						ctxWith = util.WithQuotaEndpoint(ctxWith, qe)
-					}
-					if hasReqBill {
-						ctxWith = util.WithBillingEnforcement(ctxWith, reqBill)
-					}
-					if hasReqQuota {
-						ctxWith = util.WithQuotaEnforcement(ctxWith, reqQuota)
-					}
-					// Prefer chi's generated request ID from context; fallback to header if provided by client
-					if rid := middleware.GetReqID(r.Context()); rid != "" {
-						ctxWith = util.WithRequestID(ctxWith, rid)
-					} else if rid := r.Header.Get("X-Request-ID"); rid != "" {
-						ctxWith = util.WithRequestID(ctxWith, rid)
-					}
-					next.ServeHTTP(w, r.WithContext(ctxWith))
-				})
-			})
-		}
-	}
+	// Add middleware to set up billing and quota context from Custom config
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
 
-	sourcesMap, authServicesMap, toolsMap, toolsetsMap, err := InitializeConfigs(ctx, cfg)
+			// Set billing endpoint if configured
+			if billingEndpoint, ok := cfg.Custom["billingEndpoint"].(string); ok && billingEndpoint != "" {
+				ctx = util.WithBillingEndpoint(ctx, billingEndpoint)
+			}
+
+			// Set billing enforcement if configured (handle various types)
+			if requireBillingVal, exists := cfg.Custom["requireBillingPost"]; exists {
+				var requireBilling bool
+				switch v := requireBillingVal.(type) {
+				case bool:
+					requireBilling = v
+				case string:
+					requireBilling = strings.ToLower(v) == "true"
+				case int:
+					requireBilling = v != 0
+				}
+				if requireBilling {
+					ctx = util.WithBillingEnforcement(ctx, requireBilling)
+				}
+			}
+
+			// Set quota endpoint if configured
+			if quotaEndpoint, ok := cfg.Custom["quotaEndpoint"].(string); ok && quotaEndpoint != "" {
+				ctx = util.WithQuotaEndpoint(ctx, quotaEndpoint)
+			}
+
+			// Set quota enforcement if configured (handle various types)
+			if requireQuotaVal, exists := cfg.Custom["requireQuotaPreflight"]; exists {
+				var requireQuota bool
+				switch v := requireQuotaVal.(type) {
+				case bool:
+					requireQuota = v
+				case string:
+					requireQuota = strings.ToLower(v) == "true"
+				case int:
+					requireQuota = v != 0
+				}
+				if requireQuota {
+					ctx = util.WithQuotaEnforcement(ctx, requireQuota)
+				}
+			}
+
+			// Set request ID for billing
+			if requestID := middleware.GetReqID(ctx); requestID != "" {
+				ctx = util.WithRequestID(ctx, requestID)
+			}
+
+			r = r.WithContext(ctx)
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	sourcesMap, authServicesMap, toolsMap, toolsetsMap, promptsMap, promptsetsMap, err := InitializeConfigs(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize configs: %w", err)
 	}
@@ -359,7 +488,7 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 
 	sseManager := newSseManager(ctx)
 
-	resourceManager := NewResourceManager(sourcesMap, authServicesMap, toolsMap, toolsetsMap)
+	resourceManager := NewResourceManager(sourcesMap, authServicesMap, toolsMap, toolsetsMap, promptsMap, promptsetsMap)
 
 	s := &Server{
 		version:         cfg.Version,

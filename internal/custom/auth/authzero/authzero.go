@@ -86,8 +86,7 @@ func (cfg Config) Initialize() (auth.AuthService, error) {
 	}
 	logger.Info("jwks_loaded", "url", jwksURL)
 	return &AuthService{
-		Name:        cfg.Name,
-		Kind:        AuthServiceKind,
+		Config:      cfg,
 		Domain:      host,
 		Audience:    cfg.Audience,
 		JWKS:        jwks,
@@ -101,10 +100,9 @@ var _ auth.AuthService = (*AuthService)(nil)
 
 // AuthService validates AuthZero-issued JWT access tokens.
 type AuthService struct {
-	Name        string `yaml:"name"`
-	Kind        string `yaml:"kind"`
-	Domain      string `yaml:"domain"`
-	Audience    string `yaml:"audience"`
+	Config
+	Domain      string
+	Audience    string
 	JWKS        *keyfunc.JWKS
 	allowedAlgs []string
 	leeway      time.Duration
@@ -116,6 +114,11 @@ func (a *AuthService) AuthServiceKind() string { return AuthServiceKind }
 
 // GetName returns the configured name of this auth service.
 func (a *AuthService) GetName() string { return a.Name }
+
+// ToConfig returns the configuration for this auth service.
+func (a *AuthService) ToConfig() auth.AuthServiceConfig {
+	return a.Config
+}
 
 // GetClaimsFromHeader parses and validates a Bearer token from HTTP headers.
 // Sentinel errors for programmatic handling/log categorization.

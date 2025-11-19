@@ -75,10 +75,8 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s := &Source{
-		Name:     r.Name,
-		Kind:     SourceKind,
-		Pool:     pool,
-		Database: r.Database,
+		Config: r,
+		Pool:   pool,
 	}
 	return s, nil
 }
@@ -86,10 +84,8 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name     string `yaml:"name"`
-	Kind     string `yaml:"kind"`
-	Pool     *sql.DB
-	Database string `yaml:"database"`
+	Config
+	Pool *sql.DB
 }
 
 // DatabaseName returns the configured database name for this source.
@@ -99,6 +95,10 @@ func (s *Source) DatabaseName() string {
 
 func (s *Source) SourceKind() string {
 	return SourceKind
+}
+
+func (s *Source) ToConfig() sources.SourceConfig {
+	return s.Config
 }
 
 func (s *Source) MySQLPool() *sql.DB {

@@ -27,6 +27,7 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqlcommon"
 	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "mysql-list-active-queries"
@@ -147,18 +148,9 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
 	}
 
-	// get dbName from underlying config
-	dbName := ""
-	switch real := rawS.(type) {
-	case interface{ DatabaseName() string }:
-		dbName = real.DatabaseName()
-	default:
-		return nil, fmt.Errorf("cannot resolve database name from source type")
-	}
-
-	allParameters := tools.Parameters{
-		tools.NewIntParameterWithDefault("min_duration_secs", 0, "Optional: Only show queries running for at least this long in seconds"),
-		tools.NewIntParameterWithDefault("limit", 100, "Optional: The maximum number of rows to return."),
+	allParameters := parameters.Parameters{
+		parameters.NewIntParameterWithDefault("min_duration_secs", 0, "Optional: Only show queries running for at least this long in seconds"),
+		parameters.NewIntParameterWithDefault("limit", 100, "Optional: The maximum number of rows to return."),
 	}
 	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
 
@@ -173,17 +165,25 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	default:
 		return nil, fmt.Errorf("unsupported source kind kind: %q", sourceKind)
 	}
+
+	// get dbName from underlying config
+	dbName := ""
+	switch real := rawS.(type) {
+	case interface{ DatabaseName() string }:
+		dbName = real.DatabaseName()
+	default:
+		return nil, fmt.Errorf("cannot resolve database name from source type")
+	}
+
 	// finish tool setup
 	t := Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		AuthRequired: cfg.AuthRequired,
-		Pool:         s.MySQLPool(),
-		allParams:    allParameters,
-		manifest:     tools.Manifest{Description: cfg.Description, Parameters: allParameters.Manifest(), AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
-		statement:    statement,
-		dbName:       dbName,
+		Config:      cfg,
+		Pool:        s.MySQLPool(),
+		allParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: allParameters.Manifest(), AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
+		statement:   statement,
+		DbName:      dbName,
 	}
 	return t, nil
 }
@@ -192,18 +192,16 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name         string           `yaml:"name"`
-	Kind         string           `yaml:"kind"`
-	AuthRequired []string         `yaml:"authRequired"`
-	allParams    tools.Parameters `yaml:"parameters"`
-	Pool         *sql.DB
-	manifest     tools.Manifest
-	mcpManifest  tools.McpManifest
-	statement    string
-	dbName       string
+	Config
+	allParams   parameters.Parameters `yaml:"parameters"`
+	Pool        *sql.DB
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
+	statement   string
+	DbName      string
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
 	paramsMap := params.AsMap()
 
 	duration, ok := paramsMap["min_duration_secs"].(int)
@@ -220,9 +218,9 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	if err != nil {
 		return nil, fmt.Errorf("error getting logger: %s", err)
 	}
-	logger.DebugContext(ctx, "executing `%s` tool query: %s", kind, t.statement)
+	logger.DebugContext(ctx, fmt.Sprintf("executing `%s` tool query: %s", kind, t.statement))
 
-	results, err := t.Pool.QueryContext(ctx, t.statement, duration, duration, t.dbName, limit)
+	results, err := t.Pool.QueryContext(ctx, t.statement, duration, duration, t.DbName, limit)
 	if err != nil {
 		return nil, fmt.Errorf("unable to execute query: %w", err)
 	}
@@ -276,8 +274,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return out, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.allParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.allParams, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -294,4 +292,8 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 
 func (t Tool) RequiresClientAuthorization() bool {
 	return false
+}
+
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
 }
