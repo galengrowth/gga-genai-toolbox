@@ -20,9 +20,9 @@ import (
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/auth"
-	"github.com/googleapis/genai-toolbox/internal/auth/authzero" // AuthZero auth config
 	"github.com/googleapis/genai-toolbox/internal/auth/google"
-	"github.com/googleapis/genai-toolbox/internal/auth/hta" // Custom HTA auth (POST validation)
+	"github.com/googleapis/genai-toolbox/internal/custom/auth/authzero" // AuthZero auth config
+	"github.com/googleapis/genai-toolbox/internal/custom/auth/hta"      // Custom HTA auth (POST validation)
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"

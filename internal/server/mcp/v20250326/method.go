@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/googleapis/genai-toolbox/internal/auth"
+	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp/jsonrpc"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
@@ -202,17 +203,12 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	}
 	logger.DebugContext(ctx, fmt.Sprintf("invocation params: %s", params))
 
-	// Quota preflight: enforce only when endpoint is configured and enforcement enabled
-	if qe := util.QuotaEndpointFromContext(ctx); qe != "" {
-		if enforce, ok := util.QuotaEnforcementFromContext(ctx); ok && enforce {
-			allowed, _, _, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
-			if qerr != nil {
-				return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, fmt.Sprintf("quota preflight failed: %s", qerr), nil), qerr
-			}
-			if !allowed {
-				return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, "Insufficient tokens", nil), fmt.Errorf("Insufficient tokens")
-			}
+	// Custom preflight check
+	if allowed, err := customutil.PerformPreflightCheck(ctx, toolName); !allowed {
+		if err != nil {
+			return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
 		}
+		return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, "Insufficient tokens", nil), fmt.Errorf("insufficient tokens")
 	}
 
 	// run tool invocation and generate response.
