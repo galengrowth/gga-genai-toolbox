@@ -104,7 +104,7 @@ func (s *Source) MySQLPool() *sql.DB {
 // This is used by tools (e.g., mysql-list-tables) that need to scope
 // queries to the database defined in the source configuration.
 func (s *Source) DatabaseName() string {
-	return s.Database
+	return s.Config.Database
 }
 
 func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, project, region, instance, ipType, user, pass, dbname string) (*sql.DB, error) {

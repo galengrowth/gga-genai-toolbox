@@ -94,7 +94,7 @@ type Source struct {
 
 // DatabaseName returns the configured database name for this source.
 func (s *Source) DatabaseName() string {
-	return s.Database
+	return s.Config.Database
 }
 
 func (s *Source) SourceKind() string {
