@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	yaml "github.com/goccy/go-yaml"
+	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/sources/cloudsqlmysql"
 	"github.com/googleapis/genai-toolbox/internal/sources/mysql"
@@ -84,6 +85,15 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
 	}
 
+	// get dbName from underlying config
+	dbName := ""
+	switch real := rawS.(type) {
+	case interface{ DatabaseName() string }:
+		dbName = real.DatabaseName()
+	default:
+		return nil, fmt.Errorf("cannot resolve database name from source type")
+	}
+
 	allParameters, paramManifest, err := tools.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
 	if err != nil {
 		return nil, err
@@ -101,6 +111,7 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		Statement:          cfg.Statement,
 		AuthRequired:       cfg.AuthRequired,
 		Pool:               s.MySQLPool(),
+		Database:           dbName,
 		manifest:           tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
 		mcpManifest:        mcpManifest,
 	}
@@ -120,6 +131,7 @@ type Tool struct {
 
 	Pool        *sql.DB
 	Statement   string
+	Database    string
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
@@ -129,6 +141,11 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	newStatement, err := tools.ResolveTemplateParams(t.TemplateParameters, t.Statement, paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract template params %w", err)
+	}
+
+	// Validate SQL to prevent access to other databases
+	if err := customutil.ValidateSQLForDatabase(newStatement, t.Database); err != nil {
+		return nil, fmt.Errorf("SQL validation failed: %w", err)
 	}
 
 	newParams, err := tools.GetParams(t.Parameters, paramsMap)

@@ -52,6 +52,7 @@ const listActiveQueriesStatementMySQL = `
 		ON p.id = t.trx_mysql_thread_id
 	WHERE
 		(? IS NULL OR p.time >= ?)
+		AND p.db = ?
 		AND p.id != CONNECTION_ID()
 		AND Command NOT IN ('Binlog Dump', 'Binlog Dump GTID', 'Connect', 'Connect Out', 'Register Slave')
 		AND User NOT IN ('system user', 'event_scheduler')
@@ -82,6 +83,7 @@ const listActiveQueriesStatementCloudSQLMySQL = `
 		ON p.id = t.trx_mysql_thread_id
 	WHERE
 		(? IS NULL OR p.time >= ?)
+		AND p.db = ?
 		AND p.id != CONNECTION_ID()
 		AND SUBSTRING_INDEX(IFNULL(p.host,''), ':', 1) NOT IN ('localhost', '127.0.0.1')
 		AND IFNULL(p.host,'') NOT LIKE '::1%'
@@ -145,6 +147,15 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
 	}
 
+	// get dbName from underlying config
+	dbName := ""
+	switch real := rawS.(type) {
+	case interface{ DatabaseName() string }:
+		dbName = real.DatabaseName()
+	default:
+		return nil, fmt.Errorf("cannot resolve database name from source type")
+	}
+
 	allParameters := tools.Parameters{
 		tools.NewIntParameterWithDefault("min_duration_secs", 0, "Optional: Only show queries running for at least this long in seconds"),
 		tools.NewIntParameterWithDefault("limit", 100, "Optional: The maximum number of rows to return."),
@@ -172,6 +183,7 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		manifest:     tools.Manifest{Description: cfg.Description, Parameters: allParameters.Manifest(), AuthRequired: cfg.AuthRequired},
 		mcpManifest:  mcpManifest,
 		statement:    statement,
+		dbName:       dbName,
 	}
 	return t, nil
 }
@@ -188,6 +200,7 @@ type Tool struct {
 	manifest     tools.Manifest
 	mcpManifest  tools.McpManifest
 	statement    string
+	dbName       string
 }
 
 func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
@@ -209,7 +222,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	}
 	logger.DebugContext(ctx, "executing `%s` tool query: %s", kind, t.statement)
 
-	results, err := t.Pool.QueryContext(ctx, t.statement, duration, duration, limit)
+	results, err := t.Pool.QueryContext(ctx, t.statement, duration, duration, t.dbName, limit)
 	if err != nil {
 		return nil, fmt.Errorf("unable to execute query: %w", err)
 	}

@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	yaml "github.com/goccy/go-yaml"
+	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/sources/cloudsqlmysql"
 	"github.com/googleapis/genai-toolbox/internal/sources/mysql"
@@ -82,6 +83,14 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
 	}
 
+	// Get database name for validation
+	var dbName string
+	if real, ok := rawS.(interface{ DatabaseName() string }); ok {
+		dbName = real.DatabaseName()
+	} else {
+		return nil, fmt.Errorf("source does not support DatabaseName()")
+	}
+
 	sqlParameter := tools.NewStringParameter("sql", "The sql to execute.")
 	parameters := tools.Parameters{sqlParameter}
 
@@ -94,6 +103,7 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		Parameters:   parameters,
 		AuthRequired: cfg.AuthRequired,
 		Pool:         s.MySQLPool(),
+		Database:     dbName,
 		manifest:     tools.Manifest{Description: cfg.Description, Parameters: parameters.Manifest(), AuthRequired: cfg.AuthRequired},
 		mcpManifest:  mcpManifest,
 	}
@@ -110,6 +120,7 @@ type Tool struct {
 	Parameters   tools.Parameters `yaml:"parameters"`
 
 	Pool        *sql.DB
+	Database    string
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
@@ -119,6 +130,11 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	sql, ok := paramsMap["sql"].(string)
 	if !ok {
 		return nil, fmt.Errorf("unable to get cast %s", paramsMap["sql"])
+	}
+
+	// Validate SQL to prevent access to other databases
+	if err := customutil.ValidateSQLForDatabase(sql, t.Database); err != nil {
+		return nil, fmt.Errorf("SQL validation failed: %w", err)
 	}
 
 	// Log the query executed for debugging.

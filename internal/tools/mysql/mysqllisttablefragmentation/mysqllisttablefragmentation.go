@@ -42,8 +42,7 @@ const listTableFragmentationStatement = `
 	FROM
 		information_schema.tables
 	WHERE
-		table_schema NOT IN ('sys', 'performance_schema', 'mysql', 'information_schema')
-		AND (COALESCE(?, '') = '' OR table_schema = ?)
+		table_schema = ?
 		AND (COALESCE(?, '') = '' OR table_name = ?)
 		AND data_free >= ?
 	ORDER BY
@@ -105,9 +104,17 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
 	}
 
+	// get dbName from underlying config
+	dbName := ""
+	switch real := rawS.(type) {
+	case interface{ DatabaseName() string }:
+		dbName = real.DatabaseName()
+	default:
+		return nil, fmt.Errorf("cannot resolve database name from source type")
+	}
+
 	allParameters := tools.Parameters{
-		tools.NewStringParameterWithDefault("table_schema", "", "(Optional) The database where fragmentation check is to be executed. Check all tables visible to the current user if not specified"),
-		tools.NewStringParameterWithDefault("table_name", "", "(Optional) Name of the table to be checked. Check all tables visible to the current user if not specified."),
+		tools.NewStringParameterWithDefault("table_name", "", "(Optional) Name of the table to be checked. Check all tables in the configured database if not specified."),
 		tools.NewIntParameterWithDefault("data_free_threshold_bytes", 1, "(Optional) Only show tables with at least this much free space in bytes. Default is 1"),
 		tools.NewIntParameterWithDefault("limit", 10, "(Optional) Max rows to return, default is 10"),
 	}
@@ -122,6 +129,7 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		allParams:    allParameters,
 		manifest:     tools.Manifest{Description: cfg.Description, Parameters: allParameters.Manifest(), AuthRequired: cfg.AuthRequired},
 		mcpManifest:  mcpManifest,
+		dbName:       dbName,
 	}
 	return t, nil
 }
@@ -137,15 +145,12 @@ type Tool struct {
 	Pool         *sql.DB
 	manifest     tools.Manifest
 	mcpManifest  tools.McpManifest
+	dbName       string
 }
 
 func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
 	paramsMap := params.AsMap()
 
-	table_schema, ok := paramsMap["table_schema"].(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid 'table_schema' parameter; expected a string")
-	}
 	table_name, ok := paramsMap["table_name"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid 'table_name' parameter; expected a string")
@@ -166,7 +171,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	}
 	logger.DebugContext(ctx, "executing `%s` tool query: %s", kind, listTableFragmentationStatement)
 
-	results, err := t.Pool.QueryContext(ctx, listTableFragmentationStatement, table_schema, table_schema, table_name, table_name, data_free_threshold_bytes, limit)
+	results, err := t.Pool.QueryContext(ctx, listTableFragmentationStatement, t.dbName, table_name, table_name, data_free_threshold_bytes, limit)
 	if err != nil {
 		return nil, fmt.Errorf("unable to execute query: %w", err)
 	}
