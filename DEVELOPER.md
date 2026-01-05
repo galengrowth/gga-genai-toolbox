@@ -109,7 +109,7 @@ golangci-lint run --fix
 Execute unit tests locally:
 
 ```bash
-go test -race -v ./...
+go test -race -v ./cmd/... ./internal/...
 ```
 
 ### Integration Tests
@@ -156,6 +156,8 @@ go test -race -v ./...
 * **Internal Contributors:** Testing workflows should trigger automatically.
 * **External Contributors:** Request Toolbox maintainers to trigger the testing
   workflows on your PR.
+  * Maintainers can comment `/gcbrun` to execute the integration tests.
+  * Maintainers can add the label `tests:run` to execute the unit tests.
 
 #### Test Resources
 
@@ -183,6 +185,9 @@ variables for each source.
 * Couchbase - setup in the test project via the Marketplace
 * DGraph - using the public dgraph interface <https://play.dgraph.io> for
   testing
+* Looker
+  * The Cloud Build service account is a user for conversational analytics
+  * The Looker instance runs under google.com:looker-sandbox.
 * Memorystore Redis - setup in the test project using a Memorystore for Redis
   standalone instance
   * Memorystore Redis Cluster, Memorystore Valkey standalone, and Memorystore
@@ -201,6 +206,30 @@ variables for each source.
 * SQL Server - setup in the test project using a Cloud SQL instance
 * SQLite -  setup in the integration test, where we create a temporary database
   file
+
+### Link Checking and Fixing with Lychee
+
+We use **[lychee](https://github.com/lycheeverse/lychee-action)** for repository link checks.
+
+* To run the checker **locally**, see the [command-line usage guide](https://github.com/lycheeverse/lychee?tab=readme-ov-file#commandline-usage).
+
+####  Fixing Broken Links
+
+1.  **Update the Link:** Correct the broken URL or update the content where it is used.
+2.  **Ignore the Link:** If you can't fix the link (e.g., due to **external rate-limits** or if it's a **local-only URL**), tell Lychee to **ignore** it.
+
+    * List **regular expressions** or **direct links** in the **[.lycheeignore](https://github.com/googleapis/genai-toolbox/blob/main/.lycheeignore)** file, one entry per line.
+    * **Always add a comment** explaining **why** the link is being skipped to prevent link rot. **Example `.lycheeignore`:**
+       ```text
+       # These are email addresses, not standard web URLs, and usually cause check failures.
+       ^mailto:.*
+       ```
+> [!NOTE]
+> To avoid build failures in GitHub Actions, follow the linking pattern demonstrated here: <br>
+> **Avoid:** (Works in Hugo, breaks Link Checker): `[Read more](docs/setup)` or `[Read more](docs/setup/)` <br>
+> **Reason:** The link checker cannot find a file named "setup" or a directory with that name containing an index. <br>
+> **Preferred:** `[Read more](docs/setup.md)` <br>
+> **Reason:** The GitHub Action finds the physical file. Hugo then uses its internal logic (or render hooks) to resolve this to the correct `/docs/setup/` web URL. <br>
 
 ### Other GitHub Checks
 
@@ -250,23 +279,31 @@ Follow these steps to preview documentation changes locally using a Hugo server:
 There are 3 GHA workflows we use to achieve document versioning:
 
 1. **Deploy In-development docs:**
-    This workflow is run on every commit merged into the main branch. It deploys the built site to the `/dev/` subdirectory for the in-development documentation.
+    This workflow is run on every commit merged into the main branch. It deploys
+    the built site to the `/dev/` subdirectory for the in-development
+    documentation.
 
 1. **Deploy Versioned Docs:**
-    When a new GitHub Release is published, it performs two deployments based on the new release tag.
-    One to the new version subdirectory and one to the root directory of the versioned-gh-pages branch.
+    When a new GitHub Release is published, it performs two deployments based on
+    the new release tag. One to the new version subdirectory and one to the root
+    directory of the versioned-gh-pages branch.
 
-    **Note:** Before the release PR from release-please is merged, add the newest version into the hugo.toml file.
+    **Note:** Before the release PR from release-please is merged, add the
+    newest version into the hugo.toml file.
 
 1. **Deploy Previous Version Docs:**
     This is a manual workflow, started from the GitHub Actions UI.
-    To rebuild and redeploy documentation for an already released version that were released before this new system was in place. This workflow can be started on the UI by providing the git version tag which you want to create the documentation for.
-    The specific versioned subdirectory and the root docs are updated on the versioned-gh-pages branch.
+    To rebuild and redeploy documentation for an already released version that
+    were released before this new system was in place. This workflow can be
+    started on the UI by providing the git version tag which you want to create
+    the documentation for. The specific versioned subdirectory and the root docs
+    are updated on the versioned-gh-pages branch.
 
 #### Contributors
 
 Request a repo owner to run the preview deployment workflow on your PR. A
 preview link will be automatically added as a comment to your PR.
+
 
 #### Maintainers
 
@@ -330,9 +367,17 @@ for instructions on developing Toolbox SDKs.
 
 ### Team
 
-Team, `@googleapis/senseai-eco`, has been set as
+Team `@googleapis/senseai-eco` has been set as
 [CODEOWNERS](.github/CODEOWNERS). The GitHub TeamSync tool is used to create
-this team from MDB Group, `senseai-eco`.
+this team from MDB Group, `senseai-eco`. Additionally, database-specific GitHub
+teams (e.g., `@googleapis/toolbox-alloydb`) have been created from MDB groups to
+manage code ownership and review for individual database products.
+
+Team `@googleapis/toolbox-contributors` has write access to this repo. They
+can create branches and approve test runs. But they do not have the ability
+to approve PRs for main. TeamSync is used to create this team from the MDB
+Group `toolbox-contributors`. Googlers who are developing for MCP-Toolbox
+but aren't part of the core team should join this group.
 
 ### Releasing
 
@@ -430,7 +475,8 @@ Trigger pull request tests for external contributors by:
 
 ## Repo Setup & Automation
 
-* .github/blunderbuss.yml - Auto-assign issues and PRs from GitHub teams
+* .github/blunderbuss.yml - Auto-assign issues and PRs from GitHub teams. Use a
+  product label to assign to a product-specific team member.
 * .github/renovate.json5 - Tooling for dependency updates. Dependabot is built
   into the GitHub repo for GitHub security warnings
 * go/github-issue-mirror - GitHub issues are automatically mirrored into buganizer

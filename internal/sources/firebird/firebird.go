@@ -21,8 +21,10 @@ import (
 	"time"
 
 	"github.com/goccy/go-yaml"
-	"github.com/googleapis/genai-toolbox/internal/sources"
+	_ "github.com/nakagami/firebirdsql"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/googleapis/genai-toolbox/internal/sources"
 )
 
 const SourceKind string = "firebird"
@@ -69,9 +71,8 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s := &Source{
-		Name: r.Name,
-		Kind: SourceKind,
-		Db:   pool,
+		Config: r,
+		Db:     pool,
 	}
 	return s, nil
 }
@@ -79,17 +80,67 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name string `yaml:"name"`
-	Kind string `yaml:"kind"`
-	Db   *sql.DB
+	Config
+	Db *sql.DB
 }
 
 func (s *Source) SourceKind() string {
 	return SourceKind
 }
 
+func (s *Source) ToConfig() sources.SourceConfig {
+	return s.Config
+}
+
 func (s *Source) FirebirdDB() *sql.DB {
 	return s.Db
+}
+
+func (s *Source) RunSQL(ctx context.Context, statement string, params []any) (any, error) {
+	rows, err := s.FirebirdDB().QueryContext(ctx, statement, params...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to execute query: %w", err)
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get columns: %w", err)
+	}
+
+	values := make([]any, len(cols))
+	scanArgs := make([]any, len(values))
+	for i := range values {
+		scanArgs[i] = &values[i]
+	}
+
+	var out []any
+	for rows.Next() {
+
+		err = rows.Scan(scanArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse row: %w", err)
+		}
+
+		vMap := make(map[string]any)
+		for i, col := range cols {
+			if b, ok := values[i].([]byte); ok {
+				vMap[col] = string(b)
+			} else {
+				vMap[col] = values[i]
+			}
+		}
+		out = append(out, vMap)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	// In most cases, DML/DDL statements like INSERT, UPDATE, CREATE, etc. might return no rows
+	// However, it is also possible that this was a query that was expected to return rows
+	// but returned none, a case that we cannot distinguish here.
+	return out, nil
 }
 
 func initFirebirdConnectionPool(ctx context.Context, tracer trace.Tracer, name, host, port, user, pass, dbname string) (*sql.DB, error) {

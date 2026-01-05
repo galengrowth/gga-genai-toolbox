@@ -16,29 +16,23 @@ package clickhouse
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
-
-type compatibleSource interface {
-	ClickHousePool() *sql.DB
-}
-
-var compatibleSources = []string{"clickhouse"}
 
 const sqlKind string = "clickhouse-sql"
 
 func init() {
-	if !tools.Register(sqlKind, newSQLConfig) {
+	if !tools.Register(sqlKind, newConfig) {
 		panic(fmt.Sprintf("tool kind %q already registered", sqlKind))
 	}
 }
 
-func newSQLConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.ToolConfig, error) {
+func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.ToolConfig, error) {
 	actual := Config{Name: name}
 	if err := decoder.DecodeContext(ctx, &actual); err != nil {
 		return nil, err
@@ -46,15 +40,19 @@ func newSQLConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tool
 	return actual, nil
 }
 
+type compatibleSource interface {
+	RunSQL(context.Context, string, parameters.ParamValues) (any, error)
+}
+
 type Config struct {
-	Name               string           `yaml:"name" validate:"required"`
-	Kind               string           `yaml:"kind" validate:"required"`
-	Source             string           `yaml:"source" validate:"required"`
-	Description        string           `yaml:"description" validate:"required"`
-	Statement          string           `yaml:"statement" validate:"required"`
-	AuthRequired       []string         `yaml:"authRequired"`
-	Parameters         tools.Parameters `yaml:"parameters"`
-	TemplateParameters tools.Parameters `yaml:"templateParameters"`
+	Name               string                `yaml:"name" validate:"required"`
+	Kind               string                `yaml:"kind" validate:"required"`
+	Source             string                `yaml:"source" validate:"required"`
+	Description        string                `yaml:"description" validate:"required"`
+	Statement          string                `yaml:"statement" validate:"required"`
+	AuthRequired       []string              `yaml:"authRequired"`
+	Parameters         parameters.Parameters `yaml:"parameters"`
+	TemplateParameters parameters.Parameters `yaml:"templateParameters"`
 }
 
 var _ tools.ToolConfig = Config{}
@@ -64,30 +62,14 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", sqlKind, compatibleSources)
-	}
-
-	allParameters, paramManifest, _ := tools.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	allParameters, paramManifest, _ := parameters.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 
 	t := Tool{
-		Name:               cfg.Name,
-		Kind:               sqlKind,
-		Parameters:         cfg.Parameters,
-		TemplateParameters: cfg.TemplateParameters,
-		AllParams:          allParameters,
-		Statement:          cfg.Statement,
-		AuthRequired:       cfg.AuthRequired,
-		Pool:               s.ClickHousePool(),
-		manifest:           tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:        mcpManifest,
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
@@ -95,94 +77,38 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name               string           `yaml:"name"`
-	Kind               string           `yaml:"kind"`
-	AuthRequired       []string         `yaml:"authRequired"`
-	Parameters         tools.Parameters `yaml:"parameters"`
-	TemplateParameters tools.Parameters `yaml:"templateParameters"`
-	AllParams          tools.Parameters `yaml:"allParams"`
-
-	Pool        *sql.DB
-	Statement   string
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, token tools.AccessToken) (any, error) {
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, token tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
-	newStatement, err := tools.ResolveTemplateParams(t.TemplateParameters, t.Statement, paramsMap)
+	newStatement, err := parameters.ResolveTemplateParams(t.TemplateParameters, t.Statement, paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract template params: %w", err)
 	}
 
-	newParams, err := tools.GetParams(t.Parameters, paramsMap)
+	newParams, err := parameters.GetParams(t.Parameters, paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract standard params: %w", err)
 	}
 
-	sliceParams := newParams.AsSlice()
-	results, err := t.Pool.QueryContext(ctx, newStatement, sliceParams...)
-	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
-	}
-
-	cols, err := results.Columns()
-	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve rows column name: %w", err)
-	}
-
-	rawValues := make([]any, len(cols))
-	values := make([]any, len(cols))
-	for i := range rawValues {
-		values[i] = &rawValues[i]
-	}
-
-	colTypes, err := results.ColumnTypes()
-	if err != nil {
-		return nil, fmt.Errorf("unable to get column types: %w", err)
-	}
-
-	var out []any
-	for results.Next() {
-		err := results.Scan(values...)
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
-		}
-		vMap := make(map[string]any)
-		for i, name := range cols {
-			switch colTypes[i].DatabaseTypeName() {
-			case "String", "FixedString":
-				if rawValues[i] != nil {
-					// Handle potential []byte to string conversion if needed
-					if b, ok := rawValues[i].([]byte); ok {
-						vMap[name] = string(b)
-					} else {
-						vMap[name] = rawValues[i]
-					}
-				} else {
-					vMap[name] = nil
-				}
-			default:
-				vMap[name] = rawValues[i]
-			}
-		}
-		out = append(out, vMap)
-	}
-
-	err = results.Close()
-	if err != nil {
-		return nil, fmt.Errorf("unable to close rows: %w", err)
-	}
-
-	if err := results.Err(); err != nil {
-		return nil, fmt.Errorf("errors encountered by results.Scan: %w", err)
-	}
-
-	return out, nil
+	return source.RunSQL(ctx, newStatement, newParams)
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -197,6 +123,10 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

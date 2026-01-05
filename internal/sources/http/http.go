@@ -106,12 +106,8 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	r.DefaultHeaders["User-Agent"] = ua
 
 	s := &Source{
-		Name:           r.Name,
-		Kind:           SourceKind,
-		BaseURL:        r.BaseURL,
-		DefaultHeaders: r.DefaultHeaders,
-		QueryParams:    r.QueryParams,
-		Client:         &client,
+		Config: r,
+		client: &client,
 	}
 	return s, nil
 
@@ -120,14 +116,30 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name           string            `yaml:"name"`
-	Kind           string            `yaml:"kind"`
-	BaseURL        string            `yaml:"baseUrl"`
-	DefaultHeaders map[string]string `yaml:"headers"`
-	QueryParams    map[string]string `yaml:"queryParams"`
-	Client         *http.Client
+	Config
+	client *http.Client
 }
 
 func (s *Source) SourceKind() string {
 	return SourceKind
+}
+
+func (s *Source) ToConfig() sources.SourceConfig {
+	return s.Config
+}
+
+func (s *Source) HttpDefaultHeaders() map[string]string {
+	return s.DefaultHeaders
+}
+
+func (s *Source) HttpBaseURL() string {
+	return s.BaseURL
+}
+
+func (s *Source) HttpQueryParams() map[string]string {
+	return s.QueryParams
+}
+
+func (s *Source) Client() *http.Client {
+	return s.client
 }

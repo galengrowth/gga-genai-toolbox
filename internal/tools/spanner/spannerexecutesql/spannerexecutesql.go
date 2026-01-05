@@ -21,10 +21,9 @@ import (
 	"cloud.google.com/go/spanner"
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	spannerdb "github.com/googleapis/genai-toolbox/internal/sources/spanner"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
-	"google.golang.org/api/iterator"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "spanner-execute-sql"
@@ -46,12 +45,8 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 type compatibleSource interface {
 	SpannerClient() *spanner.Client
 	DatabaseDialect() string
+	RunSQL(context.Context, bool, string, map[string]any) (any, error)
 }
-
-// validate compatible sources are still compatible
-var _ compatibleSource = &spannerdb.Source{}
-
-var compatibleSources = [...]string{spannerdb.SourceKind}
 
 type Config struct {
 	Name         string   `yaml:"name" validate:"required"`
@@ -70,34 +65,17 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
+	sqlParameter := parameters.NewStringParameter("sql", "The sql to execute.")
+	params := parameters.Parameters{sqlParameter}
 
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	sqlParameter := tools.NewStringParameter("sql", "The sql to execute.")
-	parameters := tools.Parameters{sqlParameter}
-
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, parameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, nil)
 
 	// finish tool setup
 	t := Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		Parameters:   parameters,
-		AuthRequired: cfg.AuthRequired,
-		ReadOnly:     cfg.ReadOnly,
-		Client:       s.SpannerClient(),
-		dialect:      s.DatabaseDialect(),
-		manifest:     tools.Manifest{Description: cfg.Description, Parameters: parameters.Manifest(), AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
+		Config:      cfg,
+		Parameters:  params,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: params.Manifest(), AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
@@ -106,42 +84,18 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name         string           `yaml:"name"`
-	Kind         string           `yaml:"kind"`
-	AuthRequired []string         `yaml:"authRequired"`
-	Parameters   tools.Parameters `yaml:"parameters"`
-	ReadOnly     bool             `yaml:"readOnly"`
-	Client       *spanner.Client
-	dialect      string
-	manifest     tools.Manifest
-	mcpManifest  tools.McpManifest
+	Config
+	Parameters  parameters.Parameters `yaml:"parameters"`
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
-// processRows iterates over the spanner.RowIterator and converts each row to a map[string]any.
-func processRows(iter *spanner.RowIterator) ([]any, error) {
-	var out []any
-	defer iter.Stop()
-
-	for {
-		row, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
-		}
-
-		vMap := make(map[string]any)
-		cols := row.ColumnNames()
-		for i, c := range cols {
-			vMap[c] = row.ColumnValue(i)
-		}
-		out = append(out, vMap)
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
-}
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
 	paramsMap := params.AsMap()
 	sql, ok := paramsMap["sql"].(string)
 	if !ok {
@@ -153,36 +107,12 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	if err != nil {
 		return nil, fmt.Errorf("error getting logger: %s", err)
 	}
-	logger.DebugContext(ctx, "executing `%s` tool query: %s", kind, sql)
-
-	var results []any
-	var opErr error
-	stmt := spanner.Statement{SQL: sql}
-
-	if t.ReadOnly {
-		iter := t.Client.Single().Query(ctx, stmt)
-		results, opErr = processRows(iter)
-	} else {
-		_, opErr = t.Client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
-			var err error
-			iter := txn.Query(ctx, stmt)
-			results, err = processRows(iter)
-			if err != nil {
-				return err
-			}
-			return nil
-		})
-	}
-
-	if opErr != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", opErr)
-	}
-
-	return results, nil
+	logger.DebugContext(ctx, fmt.Sprintf("executing `%s` tool query: %s", kind, sql))
+	return source.RunSQL(ctx, t.ReadOnly, sql, nil)
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.Parameters, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.Parameters, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -197,6 +127,14 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

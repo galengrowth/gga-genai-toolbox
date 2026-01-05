@@ -24,6 +24,7 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/sources/clickhouse"
 	"github.com/googleapis/genai-toolbox/internal/testutils"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 func TestConfigToolConfigKind(t *testing.T) {
@@ -85,8 +86,8 @@ func TestParseFromYamlClickHouseSQL(t *testing.T) {
 					Source:      "test-source",
 					Description: "Test ClickHouse tool",
 					Statement:   "SELECT * FROM test_table WHERE id = $1",
-					Parameters: tools.Parameters{
-						tools.NewStringParameter("id", "Test ID"),
+					Parameters: parameters.Parameters{
+						parameters.NewStringParameter("id", "Test ID"),
 					},
 					AuthRequired: []string{},
 				},
@@ -116,7 +117,7 @@ func TestSQLConfigInitializeValidSource(t *testing.T) {
 		Source:      "test-clickhouse",
 		Description: "Test tool",
 		Statement:   "SELECT 1",
-		Parameters:  tools.Parameters{},
+		Parameters:  parameters.Parameters{},
 	}
 
 	// Create a mock ClickHouse source
@@ -141,67 +142,11 @@ func TestSQLConfigInitializeValidSource(t *testing.T) {
 	}
 }
 
-func TestSQLConfigInitializeMissingSource(t *testing.T) {
-	config := Config{
-		Name:        "test-tool",
-		Kind:        sqlKind,
-		Source:      "missing-source",
-		Description: "Test tool",
-		Statement:   "SELECT 1",
-		Parameters:  tools.Parameters{},
-	}
-
-	sources := map[string]sources.Source{}
-
-	_, err := config.Initialize(sources)
-	if err == nil {
-		t.Fatal("Expected error for missing source, got nil")
-	}
-
-	expectedErr := `no source named "missing-source" configured`
-	if err.Error() != expectedErr {
-		t.Errorf("Expected error %q, got %q", expectedErr, err.Error())
-	}
-}
-
-// mockIncompatibleSource is a mock source that doesn't implement the compatibleSource interface
-type mockIncompatibleSource struct{}
-
-func (m *mockIncompatibleSource) SourceKind() string {
-	return "mock"
-}
-
-func TestSQLConfigInitializeIncompatibleSource(t *testing.T) {
-	config := Config{
-		Name:        "test-tool",
-		Kind:        sqlKind,
-		Source:      "incompatible-source",
-		Description: "Test tool",
-		Statement:   "SELECT 1",
-		Parameters:  tools.Parameters{},
-	}
-
-	mockSource := &mockIncompatibleSource{}
-
-	sources := map[string]sources.Source{
-		"incompatible-source": mockSource,
-	}
-
-	_, err := config.Initialize(sources)
-	if err == nil {
-		t.Fatal("Expected error for incompatible source, got nil")
-	}
-
-	if err.Error() == "" {
-		t.Error("Expected non-empty error message")
-	}
-}
-
 func TestToolManifest(t *testing.T) {
 	tool := Tool{
 		manifest: tools.Manifest{
 			Description: "Test description",
-			Parameters:  []tools.ParameterManifest{},
+			Parameters:  []parameters.ParameterManifest{},
 		},
 	}
 
@@ -264,7 +209,9 @@ func TestToolAuthorized(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := Tool{
-				AuthRequired: tt.authRequired,
+				Config: Config{
+					AuthRequired: tt.authRequired,
+				},
 			}
 
 			authorized := tool.Authorized(tt.verifiedAuthServices)

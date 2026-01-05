@@ -21,9 +21,9 @@ import (
 	firestoreapi "cloud.google.com/go/firestore"
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	firestoreds "github.com/googleapis/genai-toolbox/internal/sources/firestore"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/firestore/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "firestore-delete-documents"
@@ -47,11 +47,6 @@ type compatibleSource interface {
 	FirestoreClient() *firestoreapi.Client
 }
 
-// validate compatible sources are still compatible
-var _ compatibleSource = &firestoreds.Source{}
-
-var compatibleSources = [...]string{firestoreds.SourceKind}
-
 type Config struct {
 	Name         string   `yaml:"name" validate:"required"`
 	Kind         string   `yaml:"kind" validate:"required"`
@@ -68,32 +63,17 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
+	documentPathsParameter := parameters.NewArrayParameter(documentPathsKey, "Array of relative document paths to delete from Firestore (e.g., 'users/userId' or 'users/userId/posts/postId'). Note: These are relative paths, NOT absolute paths like 'projects/{project_id}/databases/{database_id}/documents/...'", parameters.NewStringParameter("item", "Relative document path"))
+	params := parameters.Parameters{documentPathsParameter}
 
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	documentPathsParameter := tools.NewArrayParameter(documentPathsKey, "Array of relative document paths to delete from Firestore (e.g., 'users/userId' or 'users/userId/posts/postId'). Note: These are relative paths, NOT absolute paths like 'projects/{project_id}/databases/{database_id}/documents/...'", tools.NewStringParameter("item", "Relative document path"))
-	parameters := tools.Parameters{documentPathsParameter}
-
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, parameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, nil)
 
 	// finish tool setup
 	t := Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		Parameters:   parameters,
-		AuthRequired: cfg.AuthRequired,
-		Client:       s.FirestoreClient(),
-		manifest:     tools.Manifest{Description: cfg.Description, Parameters: parameters.Manifest(), AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
+		Config:      cfg,
+		Parameters:  params,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: params.Manifest(), AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
@@ -102,17 +82,22 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name         string           `yaml:"name"`
-	Kind         string           `yaml:"kind"`
-	AuthRequired []string         `yaml:"authRequired"`
-	Parameters   tools.Parameters `yaml:"parameters"`
-
-	Client      *firestoreapi.Client
+	Config
+	Parameters  parameters.Parameters `yaml:"parameters"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	mapParams := params.AsMap()
 	documentPathsRaw, ok := mapParams[documentPathsKey].([]any)
 	if !ok {
@@ -124,7 +109,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	}
 
 	// Use ConvertAnySliceToTyped to convert the slice
-	typedSlice, err := tools.ConvertAnySliceToTyped(documentPathsRaw, "string")
+	typedSlice, err := parameters.ConvertAnySliceToTyped(documentPathsRaw, "string")
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert document paths: %w", err)
 	}
@@ -142,14 +127,14 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	}
 
 	// Create a BulkWriter to handle multiple deletions efficiently
-	bulkWriter := t.Client.BulkWriter(ctx)
+	bulkWriter := source.FirestoreClient().BulkWriter(ctx)
 
 	// Keep track of jobs for each document
 	jobs := make([]*firestoreapi.BulkWriterJob, len(documentPaths))
 
 	// Add all delete operations to the BulkWriter
 	for i, path := range documentPaths {
-		docRef := t.Client.Doc(path)
+		docRef := source.FirestoreClient().Doc(path)
 		job, err := bulkWriter.Delete(docRef)
 		if err != nil {
 			return nil, fmt.Errorf("failed to add delete operation for document %q: %w", path, err)
@@ -181,8 +166,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return results, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.Parameters, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.Parameters, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -197,6 +182,10 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

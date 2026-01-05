@@ -30,14 +30,14 @@ jobs:
 
     steps:
       - name: Checkout main branch (for latest templates and theme)
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
         with:
           ref: 'main'
           submodules: 'recursive'
           fetch-depth: 0
 
       - name: Checkout old content from tag into a temporary directory
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
         with:
           ref: ${{ github.event.inputs.version_tag }}
           path: 'old_version_source' # Checkout into a temp subdir
@@ -57,7 +57,7 @@ jobs:
         with:
           hugo-version: "0.145.0"
           extended: true
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
         with:
           node-version: "22"
 

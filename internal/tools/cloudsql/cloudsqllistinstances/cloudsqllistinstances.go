@@ -20,8 +20,8 @@ import (
 
 	"github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	cloudsqladminsrc "github.com/googleapis/genai-toolbox/internal/sources/cloudsqladmin"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "cloud-sql-list-instances"
@@ -38,6 +38,12 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 		return nil, err
 	}
 	return actual, nil
+}
+
+type compatibleSource interface {
+	GetDefaultProject() string
+	UseClientAuthorization() bool
+	ListInstance(context.Context, string, string) (any, error)
 }
 
 // Config defines the configuration for the list-instance tool.
@@ -63,13 +69,21 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	if !ok {
 		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
 	}
-	s, ok := rawS.(*cloudsqladminsrc.Source)
+	s, ok := rawS.(compatibleSource)
 	if !ok {
 		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `cloud-sql-admin`", kind)
 	}
 
-	allParameters := tools.Parameters{
-		tools.NewStringParameter("project", "The project ID"),
+	project := s.GetDefaultProject()
+	var projectParam parameters.Parameter
+	if project != "" {
+		projectParam = parameters.NewStringParameterWithDefault("project", project, "The GCP project ID. This is pre-configured; do not ask for it unless the user explicitly provides a different one.")
+	} else {
+		projectParam = parameters.NewStringParameter("project", "The project ID")
+	}
+
+	allParameters := parameters.Parameters{
+		projectParam,
 	}
 	paramManifest := allParameters.Manifest()
 
@@ -77,74 +91,47 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	if description == "" {
 		description = "Lists all type of Cloud SQL instances for a project."
 	}
-	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, allParameters, nil)
 
 	return Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		AuthRequired: cfg.AuthRequired,
-		source:       s,
-		AllParams:    allParameters,
-		manifest:     tools.Manifest{Description: description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}, nil
 }
 
 // Tool represents the list-instance tool.
 type Tool struct {
-	Name         string   `yaml:"name"`
-	Kind         string   `yaml:"kind"`
-	Description  string   `yaml:"description"`
-	AuthRequired []string `yaml:"authRequired"`
-
-	AllParams   tools.Parameters `yaml:"allParams"`
-	source      *cloudsqladminsrc.Source
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
 // Invoke executes the tool's logic.
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
 
 	project, ok := paramsMap["project"].(string)
 	if !ok {
 		return nil, fmt.Errorf("missing 'project' parameter")
 	}
-
-	service, err := t.source.GetService(ctx, string(accessToken))
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := service.Instances.List(project).Do()
-	if err != nil {
-		return nil, fmt.Errorf("error listing instances: %w", err)
-	}
-
-	if resp.Items == nil {
-		return []any{}, nil
-	}
-
-	type instanceInfo struct {
-		Name         string `json:"name"`
-		InstanceType string `json:"instanceType"`
-	}
-
-	var instances []instanceInfo
-	for _, item := range resp.Items {
-		instances = append(instances, instanceInfo{
-			Name:         item.Name,
-			InstanceType: item.InstanceType,
-		})
-	}
-
-	return instances, nil
+	return source.ListInstance(ctx, project, string(accessToken))
 }
 
 // ParseParams parses the parameters for the tool.
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claims)
 }
 
 // Manifest returns the tool's manifest.
@@ -162,6 +149,14 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return true
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.source.UseClientAuthorization()
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return false, err
+	}
+	return source.UseClientAuthorization(), nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

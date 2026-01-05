@@ -19,9 +19,9 @@ import (
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	lookersrc "github.com/googleapis/genai-toolbox/internal/sources/looker"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/looker/lookercommon"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 
 	"github.com/looker-open-source/sdk-codegen/go/rtl"
 	v4 "github.com/looker-open-source/sdk-codegen/go/sdk/v4"
@@ -43,12 +43,19 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	UseClientAuthorization() bool
+	GetAuthTokenHeaderName() string
+	LookerClient() *v4.LookerSDK
+	LookerApiSettings() *rtl.ApiSettings
+}
 type Config struct {
-	Name         string   `yaml:"name" validate:"required"`
-	Kind         string   `yaml:"kind" validate:"required"`
-	Source       string   `yaml:"source" validate:"required"`
-	Description  string   `yaml:"description" validate:"required"`
-	AuthRequired []string `yaml:"authRequired"`
+	Name         string                 `yaml:"name" validate:"required"`
+	Kind         string                 `yaml:"kind" validate:"required"`
+	Source       string                 `yaml:"source" validate:"required"`
+	Description  string                 `yaml:"description" validate:"required"`
+	AuthRequired []string               `yaml:"authRequired"`
+	Annotations  *tools.ToolAnnotations `yaml:"annotations,omitempty"`
 }
 
 // validate interface
@@ -59,37 +66,30 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
+	projectIdParameter := parameters.NewStringParameter("project_id", "The id of the project containing the files")
+	filePathParameter := parameters.NewStringParameter("file_path", "The path of the file within the project")
+	fileContentParameter := parameters.NewStringParameter("file_content", "The content of the file")
+	params := parameters.Parameters{projectIdParameter, filePathParameter, fileContentParameter}
+
+	annotations := cfg.Annotations
+	if annotations == nil {
+		readOnlyHint := false
+		destructiveHint := true
+		annotations = &tools.ToolAnnotations{
+			ReadOnlyHint:    &readOnlyHint,
+			DestructiveHint: &destructiveHint,
+		}
 	}
 
-	// verify the source is compatible
-	s, ok := rawS.(*lookersrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `looker`", kind)
-	}
-
-	projectIdParameter := tools.NewStringParameter("project_id", "The id of the project containing the files")
-	filePathParameter := tools.NewStringParameter("file_path", "The path of the file within the project")
-	fileContentParameter := tools.NewStringParameter("file_content", "The content of the file")
-	parameters := tools.Parameters{projectIdParameter, filePathParameter, fileContentParameter}
-
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, parameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, annotations)
 
 	// finish tool setup
 	return Tool{
-		Name:           cfg.Name,
-		Kind:           kind,
-		Parameters:     parameters,
-		AuthRequired:   cfg.AuthRequired,
-		UseClientOAuth: s.UseClientOAuth,
-		Client:         s.Client,
-		ApiSettings:    s.ApiSettings,
+		Config:     cfg,
+		Parameters: params,
 		manifest: tools.Manifest{
 			Description:  cfg.Description,
-			Parameters:   parameters.Manifest(),
+			Parameters:   params.Manifest(),
 			AuthRequired: cfg.AuthRequired,
 		},
 		mcpManifest: mcpManifest,
@@ -100,19 +100,23 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name           string `yaml:"name"`
-	Kind           string `yaml:"kind"`
-	UseClientOAuth bool
-	Client         *v4.LookerSDK
-	ApiSettings    *rtl.ApiSettings
-	AuthRequired   []string         `yaml:"authRequired"`
-	Parameters     tools.Parameters `yaml:"parameters"`
-	manifest       tools.Manifest
-	mcpManifest    tools.McpManifest
+	Config
+	Parameters  parameters.Parameters `yaml:"parameters"`
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
-	sdk, err := lookercommon.GetLookerSDK(t.UseClientOAuth, t.ApiSettings, t.Client, accessToken)
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
+	sdk, err := lookercommon.GetLookerSDK(source.UseClientAuthorization(), source.LookerApiSettings(), source.LookerClient(), accessToken)
 	if err != nil {
 		return nil, fmt.Errorf("error getting sdk: %w", err)
 	}
@@ -136,7 +140,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		Content: fileContent,
 	}
 
-	err = lookercommon.UpdateProjectFile(sdk, projectId, req, t.ApiSettings)
+	err = lookercommon.UpdateProjectFile(sdk, projectId, req, source.LookerApiSettings())
 	if err != nil {
 		return nil, fmt.Errorf("error making update_project_file request: %s", err)
 	}
@@ -148,8 +152,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return data, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.Parameters, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.Parameters, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -164,6 +168,18 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.UseClientOAuth
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return false, err
+	}
+	return source.UseClientAuthorization(), nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return "", err
+	}
+	return source.GetAuthTokenHeaderName(), nil
 }

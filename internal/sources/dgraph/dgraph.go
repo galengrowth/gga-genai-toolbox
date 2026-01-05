@@ -26,6 +26,7 @@ import (
 
 	"github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -89,8 +90,7 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s := &Source{
-		Name:   r.Name,
-		Kind:   SourceKind,
+		Config: r,
 		Client: hc,
 	}
 	return s, nil
@@ -99,8 +99,7 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name   string        `yaml:"name"`
-	Kind   string        `yaml:"kind"`
+	Config
 	Client *DgraphClient `yaml:"client"`
 }
 
@@ -108,8 +107,34 @@ func (s *Source) SourceKind() string {
 	return SourceKind
 }
 
+func (s *Source) ToConfig() sources.SourceConfig {
+	return s.Config
+}
+
 func (s *Source) DgraphClient() *DgraphClient {
 	return s.Client
+}
+
+func (s *Source) RunSQL(statement string, params parameters.ParamValues, isQuery bool, timeout string) (any, error) {
+	paramsMap := params.AsMapWithDollarPrefix()
+	resp, err := s.DgraphClient().ExecuteQuery(statement, paramsMap, isQuery, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := checkError(resp); err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		Data map[string]interface{} `json:"data"`
+	}
+
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("error parsing JSON: %v", err)
+	}
+
+	return result.Data, nil
 }
 
 func initDgraphHttpClient(ctx context.Context, tracer trace.Tracer, r Config) (*DgraphClient, error) {
@@ -283,7 +308,7 @@ func (hc *DgraphClient) doLogin(creds map[string]interface{}) error {
 		return err
 	}
 
-	if err := CheckError(resp); err != nil {
+	if err := checkError(resp); err != nil {
 		return err
 	}
 
@@ -368,7 +393,7 @@ func getUrl(baseUrl, resource string, params url.Values) (string, error) {
 	return u.String(), nil
 }
 
-func CheckError(resp []byte) error {
+func checkError(resp []byte) error {
 	var errResp struct {
 		Errors []struct {
 			Message string `json:"message"`

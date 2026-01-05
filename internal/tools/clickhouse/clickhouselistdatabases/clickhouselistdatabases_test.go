@@ -20,30 +20,14 @@ import (
 	yaml "github.com/goccy/go-yaml"
 	"github.com/google/go-cmp/cmp"
 	"github.com/googleapis/genai-toolbox/internal/server"
-	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/testutils"
-	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 func TestListDatabasesConfigToolConfigKind(t *testing.T) {
 	cfg := Config{}
 	if cfg.ToolConfigKind() != listDatabasesKind {
 		t.Errorf("expected %q, got %q", listDatabasesKind, cfg.ToolConfigKind())
-	}
-}
-
-func TestListDatabasesConfigInitializeMissingSource(t *testing.T) {
-	cfg := Config{
-		Name:        "test-list-databases",
-		Kind:        listDatabasesKind,
-		Source:      "missing-source",
-		Description: "Test list databases tool",
-	}
-
-	srcs := map[string]sources.Source{}
-	_, err := cfg.Initialize(srcs)
-	if err == nil {
-		t.Error("expected error for missing source")
 	}
 }
 
@@ -95,7 +79,9 @@ func TestParseFromYamlClickHouseListDatabases(t *testing.T) {
 
 func TestListDatabasesToolParseParams(t *testing.T) {
 	tool := Tool{
-		Parameters: tools.Parameters{},
+		Config: Config{
+			Parameters: parameters.Parameters{},
+		},
 	}
 
 	params, err := tool.ParseParams(map[string]any{}, map[string]map[string]any{})

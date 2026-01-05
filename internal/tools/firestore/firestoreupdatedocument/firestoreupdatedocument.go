@@ -22,9 +22,9 @@ import (
 	firestoreapi "cloud.google.com/go/firestore"
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	firestoreds "github.com/googleapis/genai-toolbox/internal/sources/firestore"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/firestore/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "firestore-update-document"
@@ -51,11 +51,6 @@ type compatibleSource interface {
 	FirestoreClient() *firestoreapi.Client
 }
 
-// validate compatible sources are still compatible
-var _ compatibleSource = &firestoreds.Source{}
-
-var compatibleSources = [...]string{firestoreds.SourceKind}
-
 type Config struct {
 	Name         string   `yaml:"name" validate:"required"`
 	Kind         string   `yaml:"kind" validate:"required"`
@@ -72,25 +67,13 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
 	// Create parameters
-	documentPathParameter := tools.NewStringParameter(
+	documentPathParameter := parameters.NewStringParameter(
 		documentPathKey,
 		"The relative path of the document which needs to be updated (e.g., 'users/userId' or 'users/userId/posts/postId'). Note: This is a relative path, NOT an absolute path like 'projects/{project_id}/databases/{database_id}/documents/...'",
 	)
 
-	documentDataParameter := tools.NewMapParameter(
+	documentDataParameter := parameters.NewMapParameter(
 		documentDataKey,
 		`The document data in Firestore's native JSON format. Each field must be wrapped with a type indicator:
 - Strings: {"stringValue": "text"}
@@ -107,37 +90,34 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		"", // Empty string for generic map that accepts any value type
 	)
 
-	updateMaskParameter := tools.NewArrayParameterWithRequired(
+	updateMaskParameter := parameters.NewArrayParameterWithRequired(
 		updateMaskKey,
 		"The selective fields to update. If not provided, all fields in documentData will be updated. When provided, only the specified fields will be updated. Fields referenced in the mask but not present in documentData will be deleted from the document",
 		false, // not required
-		tools.NewStringParameter("field", "Field path to update or delete. Use dot notation to access nested fields within maps (e.g., 'address.city' to update the city field within an address map, or 'user.profile.name' for deeply nested fields). To delete a field, include it in the mask but omit it from documentData. Note: You cannot update individual array elements; you must update the entire array field"),
+		parameters.NewStringParameter("field", "Field path to update or delete. Use dot notation to access nested fields within maps (e.g., 'address.city' to update the city field within an address map, or 'user.profile.name' for deeply nested fields). To delete a field, include it in the mask but omit it from documentData. Note: You cannot update individual array elements; you must update the entire array field"),
 	)
 
-	returnDataParameter := tools.NewBooleanParameterWithDefault(
+	returnDataParameter := parameters.NewBooleanParameterWithDefault(
 		returnDocumentDataKey,
 		false,
 		"If set to true the output will have the data of the updated document. This flag if set to false will help avoid overloading the context of the agent.",
 	)
 
-	parameters := tools.Parameters{
+	params := parameters.Parameters{
 		documentPathParameter,
 		documentDataParameter,
 		updateMaskParameter,
 		returnDataParameter,
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, parameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, nil)
 
 	// finish tool setup
 	t := Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		Parameters:   parameters,
-		AuthRequired: cfg.AuthRequired,
-		Client:       s.FirestoreClient(),
-		manifest:     tools.Manifest{Description: cfg.Description, Parameters: parameters.Manifest(), AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
+		Config:      cfg,
+		Parameters:  params,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: params.Manifest(), AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
@@ -146,17 +126,22 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name         string           `yaml:"name"`
-	Kind         string           `yaml:"kind"`
-	AuthRequired []string         `yaml:"authRequired"`
-	Parameters   tools.Parameters `yaml:"parameters"`
-
-	Client      *firestoreapi.Client
+	Config
+	Parameters  parameters.Parameters `yaml:"parameters"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	mapParams := params.AsMap()
 
 	// Get document path
@@ -181,7 +166,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	if updateMaskRaw, ok := mapParams[updateMaskKey]; ok && updateMaskRaw != nil {
 		if updateMaskArray, ok := updateMaskRaw.([]any); ok {
 			// Use ConvertAnySliceToTyped to convert the slice
-			typedSlice, err := tools.ConvertAnySliceToTyped(updateMaskArray, "string")
+			typedSlice, err := parameters.ConvertAnySliceToTyped(updateMaskArray, "string")
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert update mask: %w", err)
 			}
@@ -199,7 +184,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	}
 
 	// Get the document reference
-	docRef := t.Client.Doc(documentPath)
+	docRef := source.FirestoreClient().Doc(documentPath)
 
 	// Prepare update data
 	var writeResult *firestoreapi.WriteResult
@@ -210,7 +195,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		updates := make([]firestoreapi.Update, 0, len(updatePaths))
 
 		// Convert document data without delete markers
-		dataMap, err := util.JSONToFirestoreValue(documentDataRaw, t.Client)
+		dataMap, err := util.JSONToFirestoreValue(documentDataRaw, source.FirestoreClient())
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert document data: %w", err)
 		}
@@ -238,7 +223,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		writeResult, writeErr = docRef.Update(ctx, updates)
 	} else {
 		// Update all fields in the document data (merge)
-		documentData, err := util.JSONToFirestoreValue(documentDataRaw, t.Client)
+		documentData, err := util.JSONToFirestoreValue(documentDataRaw, source.FirestoreClient())
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert document data: %w", err)
 		}
@@ -297,8 +282,8 @@ func getFieldValue(data map[string]interface{}, path string) (interface{}, bool)
 	return nil, false
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.Parameters, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.Parameters, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -313,6 +298,10 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

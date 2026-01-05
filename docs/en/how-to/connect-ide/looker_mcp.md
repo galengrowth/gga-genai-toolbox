@@ -18,6 +18,7 @@ to expose your developer assistant tools to a Looker instance:
 * [Cline][cline] (VS Code extension)
 * [Claude desktop][claudedesktop]
 * [Claude code][claudecode]
+* [Antigravity][antigravity]
 
 [toolbox]: https://github.com/googleapis/genai-toolbox
 [gemini-cli]: #configure-your-mcp-client
@@ -27,6 +28,7 @@ to expose your developer assistant tools to a Looker instance:
 [cline]: #configure-your-mcp-client
 [claudedesktop]: #configure-your-mcp-client
 [claudecode]: #configure-your-mcp-client
+[antigravity]: #connect-with-antigravity
 
 ## Set up Looker
 
@@ -38,6 +40,55 @@ to expose your developer assistant tools to a Looker instance:
    listening at a different port, and you will need to use
    `https://looker.example.com:19999` instead.
 
+## Connect with Antigravity
+
+You can connect Looker to Antigravity in the following ways:
+
+* Using the MCP Store
+* Using a custom configuration
+
+{{< notice note >}}
+You don't need to download the MCP Toolbox binary to use these methods.
+{{< /notice >}}
+
+{{< tabpane text=true >}}
+{{% tab header="MCP Store" lang="en" %}}
+The most straightforward way to connect to Looker in Antigravity is by using the built-in MCP Store.
+
+1. Open Antigravity and open the editor's agent panel.
+1. Click the **"..."** icon at the top of the panel and select **MCP Servers**.
+1. Locate **Looker** in the list of available servers and click Install.
+1. Follow the on-screen prompts to securely link your accounts where applicable.
+
+After you install Looker in the MCP Store, resources and tools from the server are automatically available to the editor. 
+
+{{% /tab %}}
+{{% tab header="Custom config" lang="en" %}}
+ To connect to a custom MCP server, follow these steps:
+
+1. Open Antigravity and navigate to the MCP store using the **"..."** drop-down at the top of the editor's agent panel.
+1. To open the **mcp_config.json** file, click **MCP Servers** and then click **Manage MCP Servers > View raw config**.
+1. Add the following configuration, replace the environment variables with your values, and save.
+    
+    ```json
+    {
+      "mcpServers": {
+        "looker": {
+          "command": "npx",
+          "args": ["-y", "@toolbox-sdk/server", "--prebuilt", "looker", "--stdio"],
+          "env": {
+              "LOOKER_BASE_URL": "https://looker.example.com",
+              "LOOKER_CLIENT_ID": "your-client-id",
+              "LOOKER_CLIENT_SECRET": "your-client-secret"
+          }
+        }
+      }
+    }
+    ```
+
+{{% /tab %}}
+{{< /tabpane >}}
+
 ## Install MCP Toolbox
 
 1. Download the latest version of Toolbox as a binary. Select the [correct
@@ -46,21 +97,22 @@ to expose your developer assistant tools to a Looker instance:
    v0.10.0+:
 
    <!-- {x-release-please-start-version} -->
+
 {{< tabpane persist=header >}}
 {{< tab header="linux/amd64" lang="bash" >}}
-curl -O https://storage.googleapis.com/genai-toolbox/v0.17.0/linux/amd64/toolbox
+curl -O https://storage.googleapis.com/genai-toolbox/v0.24.0/linux/amd64/toolbox
 {{< /tab >}}
 
 {{< tab header="darwin/arm64" lang="bash" >}}
-curl -O https://storage.googleapis.com/genai-toolbox/v0.17.0/darwin/arm64/toolbox
+curl -O https://storage.googleapis.com/genai-toolbox/v0.24.0/darwin/arm64/toolbox
 {{< /tab >}}
 
 {{< tab header="darwin/amd64" lang="bash" >}}
-curl -O https://storage.googleapis.com/genai-toolbox/v0.17.0/darwin/amd64/toolbox
+curl -O https://storage.googleapis.com/genai-toolbox/v0.24.0/darwin/amd64/toolbox
 {{< /tab >}}
 
 {{< tab header="windows/amd64" lang="bash" >}}
-curl -O https://storage.googleapis.com/genai-toolbox/v0.17.0/windows/amd64/toolbox.exe
+curl -O https://storage.googleapis.com/genai-toolbox/v0.24.0/windows/amd64/toolbox.exe
 {{< /tab >}}
 {{< /tabpane >}}
     <!-- {x-release-please-end} -->
@@ -82,7 +134,8 @@ curl -O https://storage.googleapis.com/genai-toolbox/v0.17.0/windows/amd64/toolb
 {{< tabpane text=true >}}
 {{% tab header="Gemini-CLI" lang="en" %}}
 
-1. Install [Gemini-CLI](https://github.com/google-gemini/gemini-cli#install-globally-with-npm).
+1. Install
+   [Gemini-CLI](https://github.com/google-gemini/gemini-cli#install-globally-with-npm).
 1. Create a directory `.gemini` in your home directory if it doesn't exist.
 1. Create the file `.gemini/settings.json` if it doesn't exist.
 1. Add the following configuration, or add the mcpServers stanza if you already
@@ -287,7 +340,15 @@ Your AI tool is now connected to Looker using MCP. Try asking your AI
 assistant to list models, explores, dimensions, and measures. Run a
 query, retrieve the SQL for a query, and run a saved Look.
 
+The full tool list is available in the [Prebuilt Tools
+Reference](../../reference/prebuilt-tools.md/#looker).
+
 The following tools are available to the LLM:
+
+### Looker Model and Query Tools
+
+These tools are used to get information about a Looker model
+and execute queries against that model.
 
 1. **get_models**: list the LookML models in Looker
 1. **get_explores**: list the explores in a given model
@@ -298,12 +359,51 @@ The following tools are available to the LLM:
 1. **query**: Run a query and return the data
 1. **query_sql**: Return the SQL generated by Looker for a query
 1. **query_url**: Return a link to the query in Looker for further exploration
+
+### Looker Content Tools
+
+These tools get saved content (Looks and Dashboards) from a Looker
+instance and create new saved content.
+
 1. **get_looks**: Return the saved Looks that match a title or description
 1. **run_look**: Run a saved Look and return the data
 1. **make_look**: Create a saved Look in Looker and return the URL
-1. **get_dashboards**: Return the saved dashboards that match a title or description
+1. **get_dashboards**: Return the saved dashboards that match a title or
+   description
+1. **run_dashboard**: Run the queries associated with a dashboard and return the
+   data
 1. **make_dashboard**: Create a saved dashboard in Looker and return the URL
 1. **add_dashboard_element**: Add a tile to a dashboard
+1. **add_dashboard_filter**: Add a filter to a dashboard
+1. **generate_embed_url**: Generate an embed url for content
+
+### Looker Instance Health Tools
+
+These tools offer the same health check algorithms that the popular
+CLI [Henry](https://github.com/looker-open-source/henry) offers.
+
+1. **health_pulse**: Check the health of a Looker intance
+1. **health_analyze**: Analyze the usage of a Looker object
+1. **health_vacuum**: Find LookML elements that might be unused
+
+### LookML Authoring Tools
+
+These tools allow enable the caller to write and modify LookML files
+as well as get the database schema needed to write LookML effectively.
+
+1. **dev_mode**: Activate dev mode.
+1. **get_projects**: Get the list of LookML projects
+1. **get_project_files**: Get the list of files in a project
+1. **get_project_file**: Get the contents of a file in a project
+1. **create_project_file**: Create a file in a project
+1. **update_project_file**: Update the contents of a file in a project
+1. **delete_project_file**: Delete a file in a project
+1. **get_connections**: Get the list of connections
+1. **get_connection_schemas**: Get the list of schemas for a connection
+1. **get_connection_databases**: Get the list of databases for a connection
+1. **get_connection_tables**: Get the list of tables for a connection
+1. **get_connection_table_columns**: Get the list of columns for a table in a
+   connection
 
 {{< notice note >}}
 Prebuilt tools are pre-1.0, so expect some tool changes between versions. LLMs

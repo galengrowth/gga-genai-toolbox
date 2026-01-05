@@ -20,10 +20,10 @@ import (
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	lookersrc "github.com/googleapis/genai-toolbox/internal/sources/looker"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/looker/lookercommon"
 	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 
 	"github.com/looker-open-source/sdk-codegen/go/rtl"
 	v4 "github.com/looker-open-source/sdk-codegen/go/sdk/v4"
@@ -45,12 +45,20 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	UseClientAuthorization() bool
+	GetAuthTokenHeaderName() string
+	LookerClient() *v4.LookerSDK
+	LookerApiSettings() *rtl.ApiSettings
+}
+
 type Config struct {
-	Name         string   `yaml:"name" validate:"required"`
-	Kind         string   `yaml:"kind" validate:"required"`
-	Source       string   `yaml:"source" validate:"required"`
-	Description  string   `yaml:"description" validate:"required"`
-	AuthRequired []string `yaml:"authRequired"`
+	Name         string                 `yaml:"name" validate:"required"`
+	Kind         string                 `yaml:"kind" validate:"required"`
+	Source       string                 `yaml:"source" validate:"required"`
+	Description  string                 `yaml:"description" validate:"required"`
+	AuthRequired []string               `yaml:"authRequired"`
+	Annotations  *tools.ToolAnnotations `yaml:"annotations,omitempty"`
 }
 
 // validate interface
@@ -61,40 +69,31 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
+	lookidParameter := parameters.NewStringParameter("look_id", "The id of the look to run.")
+	limitParameter := parameters.NewIntParameterWithDefault("limit", 500, "The row limit. Default 500")
 
-	// verify the source is compatible
-	s, ok := rawS.(*lookersrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `looker`", kind)
-	}
-
-	lookidParameter := tools.NewStringParameter("look_id", "The id of the look to run.")
-	limitParameter := tools.NewIntParameterWithDefault("limit", 500, "The row limit. Default 500")
-
-	parameters := tools.Parameters{
+	params := parameters.Parameters{
 		lookidParameter,
 		limitParameter,
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, parameters)
+	annotations := cfg.Annotations
+	if annotations == nil {
+		readOnlyHint := true
+		annotations = &tools.ToolAnnotations{
+			ReadOnlyHint: &readOnlyHint,
+		}
+	}
+
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, annotations)
 
 	// finish tool setup
 	return Tool{
-		Name:           cfg.Name,
-		Kind:           kind,
-		Parameters:     parameters,
-		AuthRequired:   cfg.AuthRequired,
-		UseClientOAuth: s.UseClientOAuth,
-		Client:         s.Client,
-		ApiSettings:    s.ApiSettings,
+		Config:     cfg,
+		Parameters: params,
 		manifest: tools.Manifest{
 			Description:  cfg.Description,
-			Parameters:   parameters.Manifest(),
+			Parameters:   params.Manifest(),
 			AuthRequired: cfg.AuthRequired,
 		},
 		mcpManifest: mcpManifest,
@@ -105,18 +104,22 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name           string `yaml:"name"`
-	Kind           string `yaml:"kind"`
-	UseClientOAuth bool
-	Client         *v4.LookerSDK
-	ApiSettings    *rtl.ApiSettings
-	AuthRequired   []string         `yaml:"authRequired"`
-	Parameters     tools.Parameters `yaml:"parameters"`
-	manifest       tools.Manifest
-	mcpManifest    tools.McpManifest
+	Config
+	Parameters  parameters.Parameters `yaml:"parameters"`
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get logger from ctx: %s", err)
@@ -126,17 +129,30 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 
 	look_id := paramsMap["look_id"].(string)
 	limit := int64(paramsMap["limit"].(int))
+	limitStr := fmt.Sprintf("%d", limit)
 
-	sdk, err := lookercommon.GetLookerSDK(t.UseClientOAuth, t.ApiSettings, t.Client, accessToken)
+	sdk, err := lookercommon.GetLookerSDK(source.UseClientAuthorization(), source.LookerApiSettings(), source.LookerClient(), accessToken)
 	if err != nil {
 		return nil, fmt.Errorf("error getting sdk: %w", err)
 	}
-	req := v4.RequestRunLook{
-		LookId:       look_id,
-		ResultFormat: "json",
-		Limit:        &limit,
+
+	look, err := sdk.Look(look_id, "", source.LookerApiSettings())
+	if err != nil {
+		return nil, fmt.Errorf("error getting look definition: %s", err)
 	}
-	resp, err := sdk.RunLook(req, t.ApiSettings)
+
+	wq := v4.WriteQuery{
+		Model:         look.Query.Model,
+		View:          look.Query.View,
+		Fields:        look.Query.Fields,
+		Pivots:        look.Query.Pivots,
+		Filters:       look.Query.Filters,
+		Sorts:         look.Query.Sorts,
+		QueryTimezone: look.Query.QueryTimezone,
+		Limit:         &limitStr,
+	}
+
+	resp, err := lookercommon.RunInlineQuery(ctx, sdk, &wq, "json", source.LookerApiSettings())
 	if err != nil {
 		return nil, fmt.Errorf("error making run_look request: %s", err)
 	}
@@ -153,8 +169,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return data, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.Parameters, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.Parameters, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -169,6 +185,18 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.UseClientOAuth
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return false, err
+	}
+	return source.UseClientAuthorization(), nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return "", err
+	}
+	return source.GetAuthTokenHeaderName(), nil
 }

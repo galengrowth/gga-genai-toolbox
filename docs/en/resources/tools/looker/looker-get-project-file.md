@@ -26,16 +26,21 @@ tools:
         kind: looker-get-project-file
         source: looker-source
         description: |
-          get_project_file Tool
+          This tool retrieves the raw content of a specific LookML file from within a project.
 
-          Given a project_id and a file path within the project, this tool returns
-          the contents of the LookML file.
+          Parameters:
+          - project_id (required): The unique ID of the LookML project, obtained from `get_projects`.
+          - file_path (required): The path to the LookML file within the project,
+            typically obtained from `get_project_files`.
+
+          Output:
+          The raw text content of the specified LookML file.
 ```
 
 ## Reference
 
-| **field**   |                  **type**                  | **required** | **description**                                                                                  |
-|-------------|:------------------------------------------:|:------------:|--------------------------------------------------------------------------------------------------|
-| kind        |                   string                   |     true     | Must be "looker-get-project-file".                                                               |
-| source      |                   string                   |     true     | Name of the source Looker instance.                                                              |
-| description |                   string                   |     true     | Description of the tool that is passed to the LLM.                                               |
+| **field**   | **type** | **required** | **description**                                    |
+|-------------|:--------:|:------------:|----------------------------------------------------|
+| kind        |  string  |     true     | Must be "looker-get-project-file".                 |
+| source      |  string  |     true     | Name of the source Looker instance.                |
+| description |  string  |     true     | Description of the tool that is passed to the LLM. |

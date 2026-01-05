@@ -77,9 +77,8 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s := &Source{
-		Name: r.Name,
-		Kind: SourceKind,
-		Pool: pool,
+		Config: r,
+		Pool:   pool,
 	}
 	return s, nil
 }
@@ -87,8 +86,7 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name string `yaml:"name"`
-	Kind string `yaml:"kind"`
+	Config
 	Pool *sql.DB
 }
 
@@ -96,8 +94,62 @@ func (s *Source) SourceKind() string {
 	return SourceKind
 }
 
+func (s *Source) ToConfig() sources.SourceConfig {
+	return s.Config
+}
+
 func (s *Source) TrinoDB() *sql.DB {
 	return s.Pool
+}
+
+func (s *Source) RunSQL(ctx context.Context, statement string, params []any) (any, error) {
+	results, err := s.TrinoDB().QueryContext(ctx, statement, params...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to execute query: %w", err)
+	}
+	defer results.Close()
+
+	cols, err := results.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve column names: %w", err)
+	}
+
+	// create an array of values for each column, which can be re-used to scan each row
+	rawValues := make([]any, len(cols))
+	values := make([]any, len(cols))
+	for i := range rawValues {
+		values[i] = &rawValues[i]
+	}
+
+	var out []any
+	for results.Next() {
+		err := results.Scan(values...)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse row: %w", err)
+		}
+		vMap := make(map[string]any)
+		for i, name := range cols {
+			val := rawValues[i]
+			if val == nil {
+				vMap[name] = nil
+				continue
+			}
+
+			// Convert byte arrays to strings for text fields
+			if b, ok := val.([]byte); ok {
+				vMap[name] = string(b)
+			} else {
+				vMap[name] = val
+			}
+		}
+		out = append(out, vMap)
+	}
+
+	if err := results.Err(); err != nil {
+		return nil, fmt.Errorf("errors encountered during row iteration: %w", err)
+	}
+
+	return out, nil
 }
 
 func initTrinoConnectionPool(ctx context.Context, tracer trace.Tracer, name, host, port, user, password, catalog, schema, queryTimeout, accessToken string, kerberosEnabled, sslEnabled bool) (*sql.DB, error) {

@@ -22,10 +22,10 @@ import (
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	lookersrc "github.com/googleapis/genai-toolbox/internal/sources/looker"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/looker/lookercommon"
 	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 	"github.com/looker-open-source/sdk-codegen/go/rtl"
 	v4 "github.com/looker-open-source/sdk-codegen/go/sdk/v4"
 )
@@ -49,13 +49,21 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	UseClientAuthorization() bool
+	GetAuthTokenHeaderName() string
+	LookerClient() *v4.LookerSDK
+	LookerApiSettings() *rtl.ApiSettings
+}
+
 type Config struct {
-	Name         string         `yaml:"name" validate:"required"`
-	Kind         string         `yaml:"kind" validate:"required"`
-	Source       string         `yaml:"source" validate:"required"`
-	Description  string         `yaml:"description" validate:"required"`
-	AuthRequired []string       `yaml:"authRequired"`
-	Parameters   map[string]any `yaml:"parameters"`
+	Name         string                 `yaml:"name" validate:"required"`
+	Kind         string                 `yaml:"kind" validate:"required"`
+	Source       string                 `yaml:"source" validate:"required"`
+	Description  string                 `yaml:"description" validate:"required"`
+	AuthRequired []string               `yaml:"authRequired"`
+	Parameters   map[string]any         `yaml:"parameters"`
+	Annotations  *tools.ToolAnnotations `yaml:"annotations,omitempty"`
 }
 
 var _ tools.ToolConfig = Config{}
@@ -65,24 +73,14 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
+	actionParameter := parameters.NewStringParameterWithRequired("action", "The analysis to run. Can be 'projects', 'models', or 'explores'.", true)
+	projectParameter := parameters.NewStringParameterWithRequired("project", "The Looker project to analyze (optional).", false)
+	modelParameter := parameters.NewStringParameterWithRequired("model", "The Looker model to analyze (optional).", false)
+	exploreParameter := parameters.NewStringParameterWithRequired("explore", "The Looker explore to analyze (optional).", false)
+	timeframeParameter := parameters.NewIntParameterWithDefault("timeframe", 90, "The timeframe in days to analyze.")
+	minQueriesParameter := parameters.NewIntParameterWithDefault("min_queries", 0, "The minimum number of queries for a model or explore to be considered used.")
 
-	s, ok := rawS.(*lookersrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `looker`", kind)
-	}
-
-	actionParameter := tools.NewStringParameterWithRequired("action", "The analysis to run. Can be 'projects', 'models', or 'explores'.", true)
-	projectParameter := tools.NewStringParameterWithRequired("project", "The Looker project to analyze (optional).", false)
-	modelParameter := tools.NewStringParameterWithRequired("model", "The Looker model to analyze (optional).", false)
-	exploreParameter := tools.NewStringParameterWithRequired("explore", "The Looker explore to analyze (optional).", false)
-	timeframeParameter := tools.NewIntParameterWithDefault("timeframe", 90, "The timeframe in days to analyze.")
-	minQueriesParameter := tools.NewIntParameterWithDefault("min_queries", 0, "The minimum number of queries for a model or explore to be considered used.")
-
-	parameters := tools.Parameters{
+	params := parameters.Parameters{
 		actionParameter,
 		projectParameter,
 		modelParameter,
@@ -91,19 +89,22 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		minQueriesParameter,
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, parameters)
+	annotations := cfg.Annotations
+	if annotations == nil {
+		readOnlyHint := true
+		annotations = &tools.ToolAnnotations{
+			ReadOnlyHint: &readOnlyHint,
+		}
+	}
+
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, annotations)
 
 	return Tool{
-		Name:           cfg.Name,
-		Kind:           kind,
-		Parameters:     parameters,
-		AuthRequired:   cfg.AuthRequired,
-		UseClientOAuth: s.UseClientOAuth,
-		Client:         s.Client,
-		ApiSettings:    s.ApiSettings,
+		Config:     cfg,
+		Parameters: params,
 		manifest: tools.Manifest{
 			Description:  cfg.Description,
-			Parameters:   parameters.Manifest(),
+			Parameters:   params.Manifest(),
 			AuthRequired: cfg.AuthRequired,
 		},
 		mcpManifest: mcpManifest,
@@ -113,24 +114,28 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name           string `yaml:"name"`
-	Kind           string `yaml:"kind"`
-	UseClientOAuth bool
-	Client         *v4.LookerSDK
-	ApiSettings    *rtl.ApiSettings
-	AuthRequired   []string `yaml:"authRequired"`
-	Parameters     tools.Parameters
-	manifest       tools.Manifest
-	mcpManifest    tools.McpManifest
+	Config
+	Parameters  parameters.Parameters
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get logger from ctx: %s", err)
 	}
 
-	sdk, err := lookercommon.GetLookerSDK(t.UseClientOAuth, t.ApiSettings, t.Client, accessToken)
+	sdk, err := lookercommon.GetLookerSDK(source.UseClientAuthorization(), source.LookerApiSettings(), source.LookerClient(), accessToken)
 	if err != nil {
 		return nil, fmt.Errorf("error getting sdk: %w", err)
 	}
@@ -187,8 +192,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		return nil, fmt.Errorf("unknown action: %s", action)
 	}
 }
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.Parameters, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.Parameters, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -199,12 +204,16 @@ func (t Tool) McpManifest() tools.McpManifest {
 	return t.mcpManifest
 }
 
-func (t Tool) Authorized(verifiedAuthServices []string) bool {
-	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return false, err
+	}
+	return source.UseClientAuthorization(), nil
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.UseClientOAuth
+func (t Tool) Authorized(verifiedAuthServices []string) bool {
+	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
 // =================================================================================================================
@@ -553,3 +562,11 @@ func (t *analyzeTool) explores(ctx context.Context, model, explore string) ([]ma
 // =================================================================================================================
 // END LOOKER HEALTH ANALYZE CORE LOGIC
 // =================================================================================================================
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return "", err
+	}
+	return source.GetAuthTokenHeaderName(), nil
+}

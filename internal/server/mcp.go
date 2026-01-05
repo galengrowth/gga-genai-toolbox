@@ -36,7 +36,6 @@ import (
 	mcputil "github.com/googleapis/genai-toolbox/internal/server/mcp/util"
 	v20241105 "github.com/googleapis/genai-toolbox/internal/server/mcp/v20241105"
 	v20250326 "github.com/googleapis/genai-toolbox/internal/server/mcp/v20250326"
-	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -144,7 +143,7 @@ func (s *stdioSession) readInputStream(ctx context.Context) error {
 			}
 			return err
 		}
-		v, res, err := processMcpMessage(ctx, []byte(line), s.server, s.protocol, "", nil)
+		v, res, err := processMcpMessage(ctx, []byte(line), s.server, s.protocol, "", "", nil)
 		if err != nil {
 			// errors during the processing of message will generate a valid MCP Error response.
 			// server can continue to run.
@@ -206,10 +205,13 @@ func (s *stdioSession) readLine(ctx context.Context) (string, error) {
 }
 
 // write writes to stdout with response to client
-func (s *stdioSession) write(ctx context.Context, response any) error {
-	res, _ := json.Marshal(response)
+func (s *stdioSession) write(_ context.Context, response any) error {
+	res, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal response to JSON: %w", err)
+	}
 
-	_, err := fmt.Fprintf(s.writer, "%s\n", res)
+	_, err = fmt.Fprintf(s.writer, "%s\n", res)
 	return err
 }
 
@@ -374,6 +376,7 @@ func httpHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	toolsetName := chi.URLParam(r, "toolsetName")
+	promptsetName := chi.URLParam(r, "promptsetName")
 	s.logger.DebugContext(ctx, fmt.Sprintf("toolset name: %s", toolsetName))
 	span.SetAttributes(attribute.String("toolset_name", toolsetName))
 
@@ -406,7 +409,7 @@ func httpHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v, res, err := processMcpMessage(ctx, body, s, protocolVersion, toolsetName, r.Header)
+	v, res, err := processMcpMessage(ctx, body, s, protocolVersion, toolsetName, promptsetName, r.Header)
 	if err != nil {
 		s.logger.DebugContext(ctx, fmt.Errorf("error processing message: %w", err).Error())
 	}
@@ -444,7 +447,7 @@ func httpHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		case jsonrpc.INVALID_REQUEST:
 			errStr := err.Error()
-			if errors.Is(err, tools.ErrUnauthorized) {
+			if errors.Is(err, util.ErrUnauthorized) {
 				w.WriteHeader(http.StatusUnauthorized)
 			} else if strings.Contains(errStr, "Error 401") {
 				w.WriteHeader(http.StatusUnauthorized)
@@ -459,7 +462,7 @@ func httpHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 }
 
 // processMcpMessage process the messages received from clients
-func processMcpMessage(ctx context.Context, body []byte, s *Server, protocolVersion string, toolsetName string, header http.Header) (string, any, error) {
+func processMcpMessage(ctx context.Context, body []byte, s *Server, protocolVersion string, toolsetName string, promptsetName string, header http.Header) (string, any, error) {
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
 		return "", jsonrpc.NewError("", jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
@@ -514,7 +517,12 @@ func processMcpMessage(ctx context.Context, body []byte, s *Server, protocolVers
 			err = fmt.Errorf("toolset does not exist")
 			return "", jsonrpc.NewError(baseMessage.Id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 		}
-		res, err := mcp.ProcessMethod(ctx, protocolVersion, baseMessage.Id, baseMessage.Method, toolset, s.ResourceMgr.GetToolsMap(), s.ResourceMgr.GetAuthServiceMap(), body, header)
+		promptset, ok := s.ResourceMgr.GetPromptset(promptsetName)
+		if !ok {
+			err = fmt.Errorf("promptset does not exist")
+			return "", jsonrpc.NewError(baseMessage.Id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
+		}
+		res, err := mcp.ProcessMethod(ctx, protocolVersion, baseMessage.Id, baseMessage.Method, toolset, promptset, s.ResourceMgr, body, header)
 		return "", res, err
 	}
 }

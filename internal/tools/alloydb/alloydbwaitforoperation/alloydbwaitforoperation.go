@@ -16,17 +16,14 @@ package alloydbwaitforoperation
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
-	"text/template"
 	"time"
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	alloydbadmin "github.com/googleapis/genai-toolbox/internal/sources/alloydbadmin"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "alloydb-wait-for-operation"
@@ -49,8 +46,8 @@ Update the MCP server configuration with the following environment variables:
           "ALLOYDB_POSTGRES_CLUSTER": "{{.Cluster}}",
 {{if .Instance}}          "ALLOYDB_POSTGRES_INSTANCE": "{{.Instance}}",
 {{end}}          "ALLOYDB_POSTGRES_DATABASE": "postgres",
-          "ALLOYDB_POSTGRES_USER": ""{{.User}}",",
-          "ALLOYDB_POSTGRES_PASSWORD": ""{{.Password}}",
+          "ALLOYDB_POSTGRES_USER": "<your-user>",
+          "ALLOYDB_POSTGRES_PASSWORD": "<your-password>"
       }
     }
   }
@@ -88,6 +85,12 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	GetDefaultProject() string
+	UseClientAuthorization() bool
+	GetOperations(context.Context, string, string, string, string, time.Duration, string) (any, error)
+}
+
 // Config defines the configuration for the wait-for-operation tool.
 type Config struct {
 	Name         string   `yaml:"name" validate:"required"`
@@ -118,14 +121,23 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
 	}
 
-	s, ok := rawS.(*alloydbadmin.Source)
+	s, ok := rawS.(compatibleSource)
 	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `%s`", kind, alloydbadmin.SourceKind)
+		return nil, fmt.Errorf("invalid source for %q tool: source %q not compatible", kind, cfg.Source)
 	}
-	allParameters := tools.Parameters{
-		tools.NewStringParameter("project", "The project ID"),
-		tools.NewStringParameter("location", "The location ID"),
-		tools.NewStringParameter("operation", "The operation ID"),
+
+	project := s.GetDefaultProject()
+	var projectParam parameters.Parameter
+	if project != "" {
+		projectParam = parameters.NewStringParameterWithDefault("project", project, "The GCP project ID. This is pre-configured; do not ask for it unless the user explicitly provides a different one.")
+	} else {
+		projectParam = parameters.NewStringParameter("project", "The project ID")
+	}
+
+	allParameters := parameters.Parameters{
+		projectParam,
+		parameters.NewStringParameter("location", "The location ID"),
+		parameters.NewStringParameter("operation", "The operation ID"),
 	}
 	paramManifest := allParameters.Manifest()
 
@@ -134,7 +146,7 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		description = "This will poll on operations API until the operation is done. For checking operation status we need projectId, locationID and operationId. Once instance is created give follow up steps on how to use the variables to bring data plane MCP server up in local and remote setup."
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, allParameters, nil)
 
 	var delay time.Duration
 	if cfg.Delay == "" {
@@ -169,43 +181,43 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	}
 
 	return Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		AuthRequired: cfg.AuthRequired,
-		Source:       s,
-		AllParams:    allParameters,
-		manifest:     tools.Manifest{Description: description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
-		Delay:        delay,
-		MaxDelay:     maxDelay,
-		Multiplier:   multiplier,
-		MaxRetries:   maxRetries,
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
+		Delay:       delay,
+		MaxDelay:    maxDelay,
+		Multiplier:  multiplier,
+		MaxRetries:  maxRetries,
 	}, nil
 }
 
 // Tool represents the wait-for-operation tool.
 type Tool struct {
-	Name         string   `yaml:"name"`
-	Kind         string   `yaml:"kind"`
-	Description  string   `yaml:"description"`
-	AuthRequired []string `yaml:"authRequired"`
-
-	Source    *alloydbadmin.Source
-	AllParams tools.Parameters `yaml:"allParams"`
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
+	Client      *http.Client
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 
 	// Polling configuration
 	Delay      time.Duration
 	MaxDelay   time.Duration
 	Multiplier float64
 	MaxRetries int
+}
 
-	Client      *http.Client
-	manifest    tools.Manifest
-	mcpManifest tools.McpManifest
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
 }
 
 // Invoke executes the tool's logic.
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
 
 	project, ok := paramsMap["project"].(string)
@@ -221,15 +233,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		return nil, fmt.Errorf("missing 'operation' parameter")
 	}
 
-	service, err := t.Source.GetService(ctx, string(accessToken))
-	if err != nil {
-		return nil, err
-	}
-
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-
-	name := fmt.Sprintf("projects/%s/locations/%s/operations/%s", project, location, operation)
 
 	delay := t.Delay
 	maxDelay := t.MaxDelay
@@ -244,33 +249,11 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		default:
 		}
 
-		op, err := service.Projects.Locations.Operations.Get(name).Do()
+		op, err := source.GetOperations(ctx, project, location, operation, alloyDBConnectionMessageTemplate, delay, string(accessToken))
 		if err != nil {
-			fmt.Printf("error getting operation: %s, retrying in %v\n", err, delay)
-		} else {
-			if op.Done {
-				if op.Error != nil {
-					var errorBytes []byte
-					errorBytes, err = json.Marshal(op.Error)
-					if err != nil {
-						return nil, fmt.Errorf("operation finished with error but could not marshal error object: %w", err)
-					}
-					return nil, fmt.Errorf("operation finished with error: %s", string(errorBytes))
-				}
-
-				var opBytes []byte
-				opBytes, err = op.MarshalJSON()
-				if err != nil {
-					return nil, fmt.Errorf("could not marshal operation: %w", err)
-				}
-
-				if msg, ok := t.generateAlloyDBConnectionMessage(map[string]any{"response": op.Response}); ok {
-					return msg, nil
-				}
-
-				return string(opBytes), nil
-			}
-			fmt.Printf("Operation not complete, retrying in %v\n", delay)
+			return nil, err
+		} else if op != nil {
+			return op, nil
 		}
 
 		time.Sleep(delay)
@@ -283,60 +266,9 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return nil, fmt.Errorf("exceeded max retries waiting for operation")
 }
 
-func (t Tool) generateAlloyDBConnectionMessage(responseData map[string]any) (string, bool) {
-	resourceName, ok := responseData["name"].(string)
-	if !ok {
-		return "", false
-	}
-
-	parts := strings.Split(resourceName, "/")
-	var project, region, cluster, instance string
-
-	// Expected format: projects/{project}/locations/{location}/clusters/{cluster}
-	// or projects/{project}/locations/{location}/clusters/{cluster}/instances/{instance}
-	if len(parts) < 6 || parts[0] != "projects" || parts[2] != "locations" || parts[4] != "clusters" {
-		return "", false
-	}
-
-	project = parts[1]
-	region = parts[3]
-	cluster = parts[5]
-
-	if len(parts) >= 8 && parts[6] == "instances" {
-		instance = parts[7]
-	} else {
-		return "", false
-	}
-
-	tmpl, err := template.New("alloydb-connection").Parse(alloyDBConnectionMessageTemplate)
-	if err != nil {
-		// This should not happen with a static template
-		return fmt.Sprintf("template parsing error: %v", err), false
-	}
-
-	data := struct {
-		Project  string
-		Region   string
-		Cluster  string
-		Instance string
-	}{
-		Project:  project,
-		Region:   region,
-		Cluster:  cluster,
-		Instance: instance,
-	}
-
-	var b strings.Builder
-	if err := tmpl.Execute(&b, data); err != nil {
-		return fmt.Sprintf("template execution error: %v", err), false
-	}
-
-	return b.String(), true
-}
-
 // ParseParams parses the parameters for the tool.
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claims)
 }
 
 // Manifest returns the tool's manifest.
@@ -354,6 +286,15 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return true
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.Source.UseClientAuthorization()
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return false, err
+	}
+
+	return source.UseClientAuthorization(), nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

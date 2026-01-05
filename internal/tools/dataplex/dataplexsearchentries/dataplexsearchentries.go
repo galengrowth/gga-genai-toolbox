@@ -22,8 +22,8 @@ import (
 	dataplexpb "cloud.google.com/go/dataplex/apiv1/dataplexpb"
 	"github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	dataplexds "github.com/googleapis/genai-toolbox/internal/sources/dataplex"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "dataplex-search-entries"
@@ -47,11 +47,6 @@ type compatibleSource interface {
 	ProjectID() string
 }
 
-// validate compatible sources are still compatible
-var _ compatibleSource = &dataplexds.Source{}
-
-var compatibleSources = [...]string{dataplexds.SourceKind}
-
 type Config struct {
 	Name         string   `yaml:"name" validate:"required"`
 	Kind         string   `yaml:"kind" validate:"required"`
@@ -68,34 +63,19 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// Initialize the search configuration with the provided sources
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
+	query := parameters.NewStringParameter("query", "The query against which entries in scope should be matched.")
+	pageSize := parameters.NewIntParameterWithDefault("pageSize", 5, "Number of results in the search page.")
+	orderBy := parameters.NewStringParameterWithDefault("orderBy", "relevance", "Specifies the ordering of results. Supported values are: relevance, last_modified_timestamp, last_modified_timestamp asc")
+	params := parameters.Parameters{query, pageSize, orderBy}
 
-	query := tools.NewStringParameter("query", "The query against which entries in scope should be matched.")
-	pageSize := tools.NewIntParameterWithDefault("pageSize", 5, "Number of results in the search page.")
-	orderBy := tools.NewStringParameterWithDefault("orderBy", "relevance", "Specifies the ordering of results. Supported values are: relevance, last_modified_timestamp, last_modified_timestamp asc")
-	parameters := tools.Parameters{query, pageSize, orderBy}
-
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, parameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, nil)
 
 	t := Tool{
-		Name:          cfg.Name,
-		Kind:          kind,
-		Parameters:    parameters,
-		AuthRequired:  cfg.AuthRequired,
-		CatalogClient: s.CatalogClient(),
-		ProjectID:     s.ProjectID(),
+		Config:     cfg,
+		Parameters: params,
 		manifest: tools.Manifest{
 			Description:  cfg.Description,
-			Parameters:   parameters.Manifest(),
+			Parameters:   params.Manifest(),
 			AuthRequired: cfg.AuthRequired,
 		},
 		mcpManifest: mcpManifest,
@@ -104,17 +84,22 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 }
 
 type Tool struct {
-	Name          string
-	Kind          string
-	Parameters    tools.Parameters
-	AuthRequired  []string
-	CatalogClient *dataplexapi.CatalogClient
-	ProjectID     string
-	manifest      tools.Manifest
-	mcpManifest   tools.McpManifest
+	Config
+	Parameters  parameters.Parameters
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
 	query, _ := paramsMap["query"].(string)
 	pageSize := int32(paramsMap["pageSize"].(int))
@@ -122,15 +107,15 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 
 	req := &dataplexpb.SearchEntriesRequest{
 		Query:          query,
-		Name:           fmt.Sprintf("projects/%s/locations/global", t.ProjectID),
+		Name:           fmt.Sprintf("projects/%s/locations/global", source.ProjectID()),
 		PageSize:       pageSize,
 		OrderBy:        orderBy,
 		SemanticSearch: true,
 	}
 
-	it := t.CatalogClient.SearchEntries(ctx, req)
+	it := source.CatalogClient().SearchEntries(ctx, req)
 	if it == nil {
-		return nil, fmt.Errorf("failed to create search entries iterator for project %q", t.ProjectID)
+		return nil, fmt.Errorf("failed to create search entries iterator for project %q", source.ProjectID())
 	}
 
 	var results []*dataplexpb.SearchEntriesResult
@@ -144,9 +129,9 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return results, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
 	// Parse parameters from the provided data
-	return tools.ParseParams(t.Parameters, data, claims)
+	return parameters.ParseParams(t.Parameters, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -162,6 +147,10 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

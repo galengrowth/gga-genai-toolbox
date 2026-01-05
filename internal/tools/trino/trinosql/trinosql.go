@@ -21,8 +21,8 @@ import (
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/sources/trino"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "trino-sql"
@@ -43,22 +43,18 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	TrinoDB() *sql.DB
+	RunSQL(context.Context, string, []any) (any, error)
 }
 
-// validate compatible sources are still compatible
-var _ compatibleSource = &trino.Source{}
-
-var compatibleSources = [...]string{trino.SourceKind}
-
 type Config struct {
-	Name               string           `yaml:"name" validate:"required"`
-	Kind               string           `yaml:"kind" validate:"required"`
-	Source             string           `yaml:"source" validate:"required"`
-	Description        string           `yaml:"description" validate:"required"`
-	Statement          string           `yaml:"statement" validate:"required"`
-	AuthRequired       []string         `yaml:"authRequired"`
-	Parameters         tools.Parameters `yaml:"parameters"`
-	TemplateParameters tools.Parameters `yaml:"templateParameters"`
+	Name               string                `yaml:"name" validate:"required"`
+	Kind               string                `yaml:"kind" validate:"required"`
+	Source             string                `yaml:"source" validate:"required"`
+	Description        string                `yaml:"description" validate:"required"`
+	Statement          string                `yaml:"statement" validate:"required"`
+	AuthRequired       []string              `yaml:"authRequired"`
+	Parameters         parameters.Parameters `yaml:"parameters"`
+	TemplateParameters parameters.Parameters `yaml:"templateParameters"`
 }
 
 // validate interface
@@ -69,37 +65,19 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	allParameters, paramManifest, err := tools.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
+	allParameters, paramManifest, err := parameters.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
 	if err != nil {
 		return nil, fmt.Errorf("unable to process parameters: %w", err)
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 
 	// finish tool setup
 	t := Tool{
-		Name:               cfg.Name,
-		Kind:               kind,
-		Parameters:         cfg.Parameters,
-		TemplateParameters: cfg.TemplateParameters,
-		AllParams:          allParameters,
-		Statement:          cfg.Statement,
-		AuthRequired:       cfg.AuthRequired,
-		Db:                 s.TrinoDB(),
-		manifest:           tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:        mcpManifest,
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
@@ -108,81 +86,33 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name               string           `yaml:"name"`
-	Kind               string           `yaml:"kind"`
-	AuthRequired       []string         `yaml:"authRequired"`
-	Parameters         tools.Parameters `yaml:"parameters"`
-	TemplateParameters tools.Parameters `yaml:"templateParameters"`
-	AllParams          tools.Parameters `yaml:"allParams"`
-
-	Statement   string
-	Db          *sql.DB
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
-	newStatement, err := tools.ResolveTemplateParams(t.TemplateParameters, t.Statement, paramsMap)
+	newStatement, err := parameters.ResolveTemplateParams(t.TemplateParameters, t.Statement, paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract template params %w", err)
 	}
-	newParams, err := tools.GetParams(t.Parameters, paramsMap)
+	newParams, err := parameters.GetParams(t.Parameters, paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract standard params %w", err)
 	}
 	sliceParams := newParams.AsSlice()
-	results, err := t.Db.QueryContext(ctx, newStatement, sliceParams...)
-	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
-	}
-	defer results.Close()
-
-	cols, err := results.Columns()
-	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve column names: %w", err)
-	}
-
-	// create an array of values for each column, which can be re-used to scan each row
-	rawValues := make([]any, len(cols))
-	values := make([]any, len(cols))
-	for i := range rawValues {
-		values[i] = &rawValues[i]
-	}
-
-	var out []any
-	for results.Next() {
-		err := results.Scan(values...)
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
-		}
-		vMap := make(map[string]any)
-		for i, name := range cols {
-			val := rawValues[i]
-			if val == nil {
-				vMap[name] = nil
-				continue
-			}
-
-			// Convert byte arrays to strings for text fields
-			if b, ok := val.([]byte); ok {
-				vMap[name] = string(b)
-			} else {
-				vMap[name] = val
-			}
-		}
-		out = append(out, vMap)
-	}
-
-	if err := results.Err(); err != nil {
-		return nil, fmt.Errorf("errors encountered during row iteration: %w", err)
-	}
-
-	return out, nil
+	return source.RunSQL(ctx, newStatement, sliceParams)
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -197,6 +127,14 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

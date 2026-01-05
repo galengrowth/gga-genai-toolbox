@@ -20,8 +20,8 @@ import (
 	"slices"
 
 	"github.com/goccy/go-yaml"
-	mongosrc "github.com/googleapis/genai-toolbox/internal/sources/mongodb"
 	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -46,21 +46,25 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	MongoClient() *mongo.Client
+}
+
 type Config struct {
-	Name           string           `yaml:"name" validate:"required"`
-	Kind           string           `yaml:"kind" validate:"required"`
-	Source         string           `yaml:"source" validate:"required"`
-	AuthRequired   []string         `yaml:"authRequired" validate:"required"`
-	Description    string           `yaml:"description" validate:"required"`
-	Database       string           `yaml:"database" validate:"required"`
-	Collection     string           `yaml:"collection" validate:"required"`
-	FilterPayload  string           `yaml:"filterPayload" validate:"required"`
-	FilterParams   tools.Parameters `yaml:"filterParams"`
-	ProjectPayload string           `yaml:"projectPayload"`
-	ProjectParams  tools.Parameters `yaml:"projectParams"`
-	SortPayload    string           `yaml:"sortPayload"`
-	SortParams     tools.Parameters `yaml:"sortParams"`
-	Limit          int64            `yaml:"limit"`
+	Name           string                `yaml:"name" validate:"required"`
+	Kind           string                `yaml:"kind" validate:"required"`
+	Source         string                `yaml:"source" validate:"required"`
+	AuthRequired   []string              `yaml:"authRequired" validate:"required"`
+	Description    string                `yaml:"description" validate:"required"`
+	Database       string                `yaml:"database" validate:"required"`
+	Collection     string                `yaml:"collection" validate:"required"`
+	FilterPayload  string                `yaml:"filterPayload" validate:"required"`
+	FilterParams   parameters.Parameters `yaml:"filterParams"`
+	ProjectPayload string                `yaml:"projectPayload"`
+	ProjectParams  parameters.Parameters `yaml:"projectParams"`
+	SortPayload    string                `yaml:"sortPayload"`
+	SortParams     parameters.Parameters `yaml:"sortParams"`
+	Limit          int64                 `yaml:"limit"`
 }
 
 // validate interface
@@ -71,23 +75,11 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(*mongosrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `mongodb`", kind)
-	}
-
 	// Create a slice for all parameters
 	allParameters := slices.Concat(cfg.FilterParams, cfg.ProjectParams, cfg.SortParams)
 
 	// Verify no duplicate parameter names
-	err := tools.CheckDuplicateParameters(allParameters)
+	err := parameters.CheckDuplicateParameters(allParameters)
 	if err != nil {
 		return nil, err
 	}
@@ -100,29 +92,18 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	// Create Toolbox manifest
 	paramManifest := allParameters.Manifest()
 	if paramManifest == nil {
-		paramManifest = make([]tools.ParameterManifest, 0)
+		paramManifest = make([]parameters.ParameterManifest, 0)
 	}
 
 	// Create MCP manifest
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 
 	// finish tool setup
 	return Tool{
-		Name:           cfg.Name,
-		Kind:           kind,
-		AuthRequired:   cfg.AuthRequired,
-		Collection:     cfg.Collection,
-		FilterPayload:  cfg.FilterPayload,
-		FilterParams:   cfg.FilterParams,
-		ProjectPayload: cfg.ProjectPayload,
-		ProjectParams:  cfg.ProjectParams,
-		SortPayload:    cfg.SortPayload,
-		SortParams:     cfg.SortParams,
-		Limit:          cfg.Limit,
-		AllParams:      allParameters,
-		database:       s.Client.Database(cfg.Database),
-		manifest:       tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:    mcpManifest,
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}, nil
 }
 
@@ -130,26 +111,13 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name           string           `yaml:"name"`
-	Kind           string           `yaml:"kind"`
-	Description    string           `yaml:"description"`
-	AuthRequired   []string         `yaml:"authRequired"`
-	Collection     string           `yaml:"collection"`
-	FilterPayload  string           `yaml:"filterPayload"`
-	FilterParams   tools.Parameters `yaml:"filterParams"`
-	ProjectPayload string           `yaml:"projectPayload"`
-	ProjectParams  tools.Parameters `yaml:"projectParams"`
-	SortPayload    string           `yaml:"sortPayload"`
-	SortParams     tools.Parameters `yaml:"sortParams"`
-	Limit          int64            `yaml:"limit"`
-	AllParams      tools.Parameters `yaml:"allParams"`
-
-	database    *mongo.Database
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func getOptions(ctx context.Context, sortParameters tools.Parameters, projectPayload string, limit int64, paramsMap map[string]any) (*options.FindOptions, error) {
+func getOptions(ctx context.Context, sortParameters parameters.Parameters, projectPayload string, limit int64, paramsMap map[string]any) (*options.FindOptions, error) {
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
 		panic(err)
@@ -165,7 +133,7 @@ func getOptions(ctx context.Context, sortParameters tools.Parameters, projectPay
 
 	if len(projectPayload) > 0 {
 
-		result, err := tools.PopulateTemplateWithJSON("MongoDBFindProjectString", projectPayload, paramsMap)
+		result, err := parameters.PopulateTemplateWithJSON("MongoDBFindProjectString", projectPayload, paramsMap)
 
 		if err != nil {
 			return nil, fmt.Errorf("error populating project payload: %s", err)
@@ -178,20 +146,25 @@ func getOptions(ctx context.Context, sortParameters tools.Parameters, projectPay
 		}
 
 		opts = opts.SetProjection(projection)
-		logger.DebugContext(ctx, "Projection is set to %v", projection)
+		logger.DebugContext(ctx, fmt.Sprintf("Projection is set to %v", projection))
 	}
 
 	if limit > 0 {
 		opts = opts.SetLimit(limit)
-		logger.DebugContext(ctx, "Limit is being set to %d", limit)
+		logger.DebugContext(ctx, fmt.Sprintf("Limit is being set to %d", limit))
 	}
 	return opts, nil
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
 
-	filterString, err := tools.PopulateTemplateWithJSON("MongoDBFindFilterString", t.FilterPayload, paramsMap)
+	filterString, err := parameters.PopulateTemplateWithJSON("MongoDBFindFilterString", t.FilterPayload, paramsMap)
 
 	if err != nil {
 		return nil, fmt.Errorf("error populating filter: %s", err)
@@ -208,7 +181,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		return nil, err
 	}
 
-	cur, err := t.database.Collection(t.Collection).Find(ctx, filter, opts)
+	cur, err := source.MongoClient().Database(t.Database).Collection(t.Collection).Find(ctx, filter, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -234,8 +207,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return final, err
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -250,6 +223,14 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

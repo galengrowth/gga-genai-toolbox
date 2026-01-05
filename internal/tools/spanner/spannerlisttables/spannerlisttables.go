@@ -22,9 +22,8 @@ import (
 	"cloud.google.com/go/spanner"
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	spannerdb "github.com/googleapis/genai-toolbox/internal/sources/spanner"
 	"github.com/googleapis/genai-toolbox/internal/tools"
-	"google.golang.org/api/iterator"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "spanner-list-tables"
@@ -46,12 +45,8 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 type compatibleSource interface {
 	SpannerClient() *spanner.Client
 	DatabaseDialect() string
+	RunSQL(context.Context, bool, string, map[string]any) (any, error)
 }
-
-// validate compatible sources are still compatible
-var _ compatibleSource = &spannerdb.Source{}
-
-var compatibleSources = [...]string{spannerdb.SourceKind}
 
 type Config struct {
 	Name         string   `yaml:"name" validate:"required"`
@@ -69,26 +64,14 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
 	// Define parameters for the tool
-	allParameters := tools.Parameters{
-		tools.NewStringParameterWithDefault(
+	allParameters := parameters.Parameters{
+		parameters.NewStringParameterWithDefault(
 			"table_names",
 			"",
 			"Optional: A comma-separated list of table names. If empty, details for all tables in user-accessible schemas will be listed.",
 		),
-		tools.NewStringParameterWithDefault(
+		parameters.NewStringParameterWithDefault(
 			"output_format",
 			"detailed",
 			"Optional: Use 'simple' to return table names only or use 'detailed' to return the full information schema.",
@@ -97,20 +80,16 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 
 	description := cfg.Description
 	if description == "" {
-		description = "Lists detailed schema information (object type, columns, constraints, indexes) as JSON for user-created tables. Filters by a comma-separated list of names. If names are omitted, lists all tables in user schemas."
+		description = "Lists detailed schema information (object type, columns, constraints, indexes) as JSON for user-created tables (ordinary or partitioned). Filters by a comma-separated list of names. If names are omitted, lists all tables in user schemas. The output can be 'simple' (table names only) or 'detailed' (full schema)."
 	}
-	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, allParameters, nil)
 
 	// finish tool setup
 	t := Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		AllParams:    allParameters,
-		AuthRequired: cfg.AuthRequired,
-		Client:       s.SpannerClient(),
-		dialect:      s.DatabaseDialect(),
-		manifest:     tools.Manifest{Description: description, Parameters: allParameters.Manifest(), AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: description, Parameters: allParameters.Manifest(), AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
@@ -119,42 +98,14 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name         string           `yaml:"name"`
-	Kind         string           `yaml:"kind"`
-	AuthRequired []string         `yaml:"authRequired"`
-	AllParams    tools.Parameters `yaml:"allParams"`
-	Client       *spanner.Client
-	dialect      string
-	manifest     tools.Manifest
-	mcpManifest  tools.McpManifest
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
-// processRows iterates over the spanner.RowIterator and converts each row to a map[string]any.
-func processRows(iter *spanner.RowIterator) ([]any, error) {
-	var out []any
-	defer iter.Stop()
-
-	for {
-		row, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
-		}
-
-		vMap := make(map[string]any)
-		cols := row.ColumnNames()
-		for i, c := range cols {
-			vMap[c] = row.ColumnValue(i)
-		}
-		out = append(out, vMap)
-	}
-	return out, nil
-}
-
-func (t Tool) getStatement() string {
-	switch strings.ToLower(t.dialect) {
+func getStatement(dialect string) string {
+	switch strings.ToLower(dialect) {
 	case "postgresql":
 		return postgresqlStatement
 	case "googlesql":
@@ -165,11 +116,16 @@ func (t Tool) getStatement() string {
 	}
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
 
 	// Get the appropriate SQL statement based on dialect
-	statement := t.getStatement()
+	statement := getStatement(source.DatabaseDialect())
 
 	// Prepare parameters based on dialect
 	var stmtParams map[string]interface{}
@@ -180,14 +136,13 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		outputFormat = "detailed"
 	}
 
-	switch strings.ToLower(t.dialect) {
+	switch strings.ToLower(source.DatabaseDialect()) {
 	case "postgresql":
 		// PostgreSQL uses positional parameters ($1, $2)
 		stmtParams = map[string]interface{}{
 			"p1": tableNames,
 			"p2": outputFormat,
 		}
-
 	case "googlesql":
 		// GoogleSQL uses named parameters (@table_names, @output_format)
 		stmtParams = map[string]interface{}{
@@ -195,26 +150,14 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 			"output_format": outputFormat,
 		}
 	default:
-		return nil, fmt.Errorf("unsupported dialect: %s", t.dialect)
+		return nil, fmt.Errorf("unsupported dialect: %s", source.DatabaseDialect())
 	}
 
-	stmt := spanner.Statement{
-		SQL:    statement,
-		Params: stmtParams,
-	}
-
-	// Execute the query (read-only)
-	iter := t.Client.Single().Query(ctx, stmt)
-	results, err := processRows(iter)
-	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
-	}
-
-	return results, nil
+	return source.RunSQL(ctx, true, statement, stmtParams)
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -229,8 +172,16 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }
 
 // PostgreSQL statement for listing tables

@@ -65,8 +65,7 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 		return nil, fmt.Errorf("error initializing Valkey client: %s", err)
 	}
 	s := &Source{
-		Name:   r.Name,
-		Kind:   SourceKind,
+		Config: r,
 		Client: client,
 	}
 	return s, nil
@@ -111,8 +110,7 @@ func initValkeyClient(ctx context.Context, r Config) (valkey.Client, error) {
 var _ sources.Source = &Source{}
 
 type Source struct {
-	Name   string `yaml:"name"`
-	Kind   string `yaml:"kind"`
+	Config
 	Client valkey.Client
 }
 
@@ -120,6 +118,44 @@ func (s *Source) SourceKind() string {
 	return SourceKind
 }
 
+func (s *Source) ToConfig() sources.SourceConfig {
+	return s.Config
+}
+
 func (s *Source) ValkeyClient() valkey.Client {
 	return s.Client
+}
+
+func (s *Source) RunCommand(ctx context.Context, cmds [][]string) (any, error) {
+	// Build commands
+	builtCmds := make(valkey.Commands, len(cmds))
+
+	for i, cmd := range cmds {
+		builtCmds[i] = s.ValkeyClient().B().Arbitrary(cmd...).Build()
+	}
+
+	if len(builtCmds) == 0 {
+		return nil, fmt.Errorf("no valid commands were built to execute")
+	}
+
+	// Execute commands
+	responses := s.ValkeyClient().DoMulti(ctx, builtCmds...)
+
+	// Parse responses
+	out := make([]any, len(cmds))
+	for i, resp := range responses {
+		if err := resp.Error(); err != nil {
+			// Store error message in the output for this command
+			out[i] = fmt.Sprintf("error from executing command at index %d: %s", i, err)
+			continue
+		}
+		val, err := resp.ToAny()
+		if err != nil {
+			out[i] = fmt.Sprintf("error parsing response: %s", err)
+			continue
+		}
+		out[i] = val
+	}
+
+	return out, nil
 }

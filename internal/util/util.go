@@ -17,8 +17,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -118,6 +120,30 @@ func UserAgentFromContext(ctx context.Context) (string, error) {
 	}
 }
 
+type UserAgentRoundTripper struct {
+	userAgent string
+	next      http.RoundTripper
+}
+
+func NewUserAgentRoundTripper(ua string, next http.RoundTripper) *UserAgentRoundTripper {
+	return &UserAgentRoundTripper{
+		userAgent: ua,
+		next:      next,
+	}
+}
+
+func (rt *UserAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// create a deep copy of the request
+	newReq := req.Clone(req.Context())
+	ua := newReq.Header.Get("User-Agent")
+	if ua == "" {
+		newReq.Header.Set("User-Agent", rt.userAgent)
+	} else {
+		newReq.Header.Set("User-Agent", ua+" "+rt.userAgent)
+	}
+	return rt.next.RoundTrip(newReq)
+}
+
 func NewStrictDecoder(v interface{}) (*yaml.Decoder, error) {
 	b, err := yaml.Marshal(v)
 	if err != nil {
@@ -162,3 +188,5 @@ func InstrumentationFromContext(ctx context.Context) (*telemetry.Instrumentation
 	}
 	return nil, fmt.Errorf("unable to retrieve instrumentation")
 }
+
+var ErrUnauthorized = errors.New("unauthorized")

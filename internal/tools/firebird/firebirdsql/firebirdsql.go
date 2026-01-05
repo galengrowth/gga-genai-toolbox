@@ -22,8 +22,8 @@ import (
 
 	"github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/sources/firebird"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "firebird-sql"
@@ -44,22 +44,18 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	FirebirdDB() *sql.DB
+	RunSQL(context.Context, string, []any) (any, error)
 }
 
-// validate compatible sources are still compatible
-var _ compatibleSource = &firebird.Source{}
-
-var compatibleSources = [...]string{firebird.SourceKind}
-
 type Config struct {
-	Name               string           `yaml:"name" validate:"required"`
-	Kind               string           `yaml:"kind" validate:"required"`
-	Source             string           `yaml:"source" validate:"required"`
-	Description        string           `yaml:"description" validate:"required"`
-	Statement          string           `yaml:"statement" validate:"required"`
-	AuthRequired       []string         `yaml:"authRequired"`
-	Parameters         tools.Parameters `yaml:"parameters"`
-	TemplateParameters tools.Parameters `yaml:"templateParameters"`
+	Name               string                `yaml:"name" validate:"required"`
+	Kind               string                `yaml:"kind" validate:"required"`
+	Source             string                `yaml:"source" validate:"required"`
+	Description        string                `yaml:"description" validate:"required"`
+	Statement          string                `yaml:"statement" validate:"required"`
+	AuthRequired       []string              `yaml:"authRequired"`
+	Parameters         parameters.Parameters `yaml:"parameters"`
+	TemplateParameters parameters.Parameters `yaml:"templateParameters"`
 }
 
 // validate interface
@@ -70,66 +66,50 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	allParameters, paramManifest, err := tools.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
+	allParameters, paramManifest, err := parameters.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
 	if err != nil {
 		return nil, err
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 
 	// finish tool setup
-	t := &Tool{
-		Name:               cfg.Name,
-		Kind:               kind,
-		Parameters:         cfg.Parameters,
-		TemplateParameters: cfg.TemplateParameters,
-		AllParams:          allParameters,
-		Statement:          cfg.Statement,
-		AuthRequired:       cfg.AuthRequired,
-		Db:                 s.FirebirdDB(),
-		manifest:           tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:        mcpManifest,
+	t := Tool{
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
 
 // validate interface
-var _ tools.Tool = &Tool{}
+var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name               string           `yaml:"name"`
-	Kind               string           `yaml:"kind"`
-	AuthRequired       []string         `yaml:"authRequired"`
-	Parameters         tools.Parameters `yaml:"parameters"`
-	TemplateParameters tools.Parameters `yaml:"templateParameters"`
-	AllParams          tools.Parameters `yaml:"allParams"`
-
-	Db          *sql.DB
-	Statement   string
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t *Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
-	statement, err := tools.ResolveTemplateParams(t.TemplateParameters, t.Statement, paramsMap)
+	statement, err := parameters.ResolveTemplateParams(t.TemplateParameters, t.Statement, paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract template params: %w", err)
 	}
 
-	newParams, err := tools.GetParams(t.Parameters, paramsMap)
+	newParams, err := parameters.GetParams(t.Parameters, paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract standard params: %w", err)
 	}
@@ -146,69 +126,29 @@ func (t *Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken
 			namedArgs = append(namedArgs, value)
 		}
 	}
-
-	rows, err := t.Db.QueryContext(ctx, statement, namedArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
-	}
-	defer rows.Close()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, fmt.Errorf("unable to get columns: %w", err)
-	}
-
-	values := make([]any, len(cols))
-	scanArgs := make([]any, len(values))
-	for i := range values {
-		scanArgs[i] = &values[i]
-	}
-
-	var out []any
-	for rows.Next() {
-
-		err = rows.Scan(scanArgs...)
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
-		}
-
-		vMap := make(map[string]any)
-		for i, col := range cols {
-			if b, ok := values[i].([]byte); ok {
-				vMap[col] = string(b)
-			} else {
-				vMap[col] = values[i]
-			}
-		}
-		out = append(out, vMap)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
-	}
-
-	// In most cases, DML/DDL statements like INSERT, UPDATE, CREATE, etc. might return no rows
-	// However, it is also possible that this was a query that was expected to return rows
-	// but returned none, a case that we cannot distinguish here.
-	return out, nil
+	return source.RunSQL(ctx, statement, namedArgs)
 }
 
-func (t *Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claims)
 }
 
-func (t *Tool) Manifest() tools.Manifest {
+func (t Tool) Manifest() tools.Manifest {
 	return t.manifest
 }
 
-func (t *Tool) McpManifest() tools.McpManifest {
+func (t Tool) McpManifest() tools.McpManifest {
 	return t.mcpManifest
 }
 
-func (t *Tool) Authorized(verifiedAuthServices []string) bool {
+func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

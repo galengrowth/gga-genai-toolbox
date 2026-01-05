@@ -26,16 +26,22 @@ tools:
         kind: looker-get-projects
         source: looker-source
         description: |
-          get_projects Tool
+          This tool retrieves a list of all LookML projects available on the Looker instance.
+          It is useful for identifying projects before performing actions like retrieving
+          project files or making modifications.
 
-          This tool returns the project_id and project_name for
-          all the LookML projects on the looker instance.
+          Parameters:
+          This tool takes no parameters.
+
+          Output:
+          A JSON array of objects, each containing the `project_id` and `project_name`
+          for a LookML project.
 ```
 
 ## Reference
 
-| **field**   |                  **type**                  | **required** | **description**                                                                                  |
-|-------------|:------------------------------------------:|:------------:|--------------------------------------------------------------------------------------------------|
-| kind        |                   string                   |     true     | Must be "looker-get-projects".                                                                   |
-| source      |                   string                   |     true     | Name of the source Looker instance.                                                              |
-| description |                   string                   |     true     | Description of the tool that is passed to the LLM.                                               |
+| **field**   | **type** | **required** | **description**                                    |
+|-------------|:--------:|:------------:|----------------------------------------------------|
+| kind        |  string  |     true     | Must be "looker-get-projects".                     |
+| source      |  string  |     true     | Name of the source Looker instance.                |
+| description |  string  |     true     | Description of the tool that is passed to the LLM. |

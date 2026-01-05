@@ -35,11 +35,15 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/auth"
 	"github.com/googleapis/genai-toolbox/internal/log"
 	"github.com/googleapis/genai-toolbox/internal/prebuiltconfigs"
+	"github.com/googleapis/genai-toolbox/internal/prompts"
 	"github.com/googleapis/genai-toolbox/internal/server"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/telemetry"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
+
+	// Import prompt packages for side effect of registration
+	_ "github.com/googleapis/genai-toolbox/internal/prompts/custom"
 
 	// Import tool packages for side effect of registration
 	_ "github.com/googleapis/genai-toolbox/internal/tools/alloydb/alloydbcreatecluster"
@@ -69,7 +73,24 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/tools/clickhouse/clickhouselistdatabases"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/clickhouse/clickhouselisttables"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/clickhouse/clickhousesql"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudgda"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcarefhirfetchpage"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcarefhirpatienteverything"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcarefhirpatientsearch"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaregetdataset"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaregetdicomstore"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaregetdicomstoremetrics"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaregetfhirresource"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaregetfhirstore"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaregetfhirstoremetrics"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcarelistdicomstores"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcarelistfhirstores"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcareretrieverendereddicominstance"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaresearchdicominstances"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaresearchdicomseries"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudhealthcare/cloudhealthcaresearchdicomstudies"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudmonitoring"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudsql/cloudsqlcloneinstance"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudsql/cloudsqlcreatedatabase"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudsql/cloudsqlcreateusers"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudsql/cloudsqlgetinstances"
@@ -79,12 +100,14 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudsqlmssql/cloudsqlmssqlcreateinstance"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudsqlmysql/cloudsqlmysqlcreateinstance"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudsqlpg/cloudsqlpgcreateinstances"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/cloudsqlpg/cloudsqlpgupgradeprecheck"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/couchbase"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/dataform/dataformcompilelocal"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/dataplex/dataplexlookupentry"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/dataplex/dataplexsearchaspecttypes"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/dataplex/dataplexsearchentries"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/dgraph"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/elasticsearch/elasticsearchesql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/firebird/firebirdexecutesql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/firebird/firebirdsql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/firestore/firestoreadddocuments"
@@ -98,10 +121,17 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/tools/firestore/firestorevalidaterules"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/http"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookeradddashboardelement"
-	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookercreateprojectfile"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookeradddashboardfilter"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerconversationalanalytics"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookercreateprojectfile"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerdeleteprojectfile"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerdevmode"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergenerateembedurl"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergetconnectiondatabases"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergetconnections"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergetconnectionschemas"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergetconnectiontablecolumns"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergetconnectiontables"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergetdashboards"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergetdimensions"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookergetexplores"
@@ -121,8 +151,11 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerquery"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerquerysql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerqueryurl"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerrundashboard"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerrunlook"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/looker/lookerupdateprojectfile"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/mindsdb/mindsdbexecutesql"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/mindsdb/mindsdbsql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mongodb/mongodbaggregate"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mongodb/mongodbdeletemany"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mongodb/mongodbdeleteone"
@@ -136,6 +169,7 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mssql/mssqllisttables"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mssql/mssqlsql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqlexecutesql"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqlgetqueryplan"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqllistactivequeries"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqllisttablefragmentation"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqllisttables"
@@ -148,14 +182,39 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/tools/oceanbase/oceanbasesql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/oracle/oracleexecutesql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/oracle/oraclesql"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgresdatabaseoverview"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgresexecutesql"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgresgetcolumncardinality"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistactivequeries"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistavailableextensions"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistdatabasestats"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistindexes"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistinstalledextensions"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistlocks"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistpgsettings"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistpublicationtables"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistquerystats"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistroles"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistschemas"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistsequences"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslisttables"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslisttablespaces"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslisttablestats"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslisttriggers"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslistviews"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgreslongrunningtransactions"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgresreplicationstats"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/postgres/postgressql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/redis"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/serverlessspark/serverlesssparkcancelbatch"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/serverlessspark/serverlesssparkcreatepysparkbatch"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/serverlessspark/serverlesssparkcreatesparkbatch"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/serverlessspark/serverlesssparkgetbatch"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/serverlessspark/serverlesssparklistbatches"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/singlestore/singlestoreexecutesql"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/singlestore/singlestoresql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/spanner/spannerexecutesql"
+	_ "github.com/googleapis/genai-toolbox/internal/tools/spanner/spannerlistgraphs"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/spanner/spannerlisttables"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/spanner/spannersql"
 	_ "github.com/googleapis/genai-toolbox/internal/tools/sqlite/sqliteexecutesql"
@@ -176,6 +235,8 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/sources/bigtable"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/cassandra"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/clickhouse"
+	_ "github.com/googleapis/genai-toolbox/internal/sources/cloudgda"
+	_ "github.com/googleapis/genai-toolbox/internal/sources/cloudhealthcare"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/cloudmonitoring"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/cloudsqladmin"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/cloudsqlmssql"
@@ -184,10 +245,12 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/sources/couchbase"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/dataplex"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/dgraph"
+	_ "github.com/googleapis/genai-toolbox/internal/sources/elasticsearch"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/firebird"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/firestore"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/http"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/looker"
+	_ "github.com/googleapis/genai-toolbox/internal/sources/mindsdb"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/mongodb"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/mssql"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/mysql"
@@ -196,6 +259,8 @@ import (
 	_ "github.com/googleapis/genai-toolbox/internal/sources/oracle"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/postgres"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/redis"
+	_ "github.com/googleapis/genai-toolbox/internal/sources/serverlessspark"
+	_ "github.com/googleapis/genai-toolbox/internal/sources/singlestore"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/spanner"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/sqlite"
 	_ "github.com/googleapis/genai-toolbox/internal/sources/tidb"
@@ -291,27 +356,27 @@ func NewCommand(opts ...Option) *Command {
 	flags.StringVarP(&cmd.cfg.Address, "address", "a", "127.0.0.1", "Address of the interface the server will listen on.")
 	flags.IntVarP(&cmd.cfg.Port, "port", "p", 5000, "Port the server will listen on.")
 
-	flags.StringVar(&cmd.tools_file, "tools_file", "", "File path specifying the tool configuration. Cannot be used with --prebuilt.")
+	flags.StringVar(&cmd.tools_file, "tools_file", "", "File path specifying the tool configuration. Cannot be used with --tools-files, or --tools-folder.")
 	// deprecate tools_file
 	_ = flags.MarkDeprecated("tools_file", "please use --tools-file instead")
-	flags.StringVar(&cmd.tools_file, "tools-file", "", "File path specifying the tool configuration. Cannot be used with --prebuilt, --tools-files, or --tools-folder.")
-	flags.StringSliceVar(&cmd.tools_files, "tools-files", []string{}, "Multiple file paths specifying tool configurations. Files will be merged. Cannot be used with --prebuilt, --tools-file, or --tools-folder.")
-	flags.StringVar(&cmd.tools_folder, "tools-folder", "", "Directory path containing YAML tool configuration files. All .yaml and .yml files in the directory will be loaded and merged. Cannot be used with --prebuilt, --tools-file, or --tools-files.")
+	flags.StringVar(&cmd.tools_file, "tools-file", "", "File path specifying the tool configuration. Cannot be used with --tools-files, or --tools-folder.")
+	flags.StringSliceVar(&cmd.tools_files, "tools-files", []string{}, "Multiple file paths specifying tool configurations. Files will be merged. Cannot be used with --tools-file, or --tools-folder.")
+	flags.StringVar(&cmd.tools_folder, "tools-folder", "", "Directory path containing YAML tool configuration files. All .yaml and .yml files in the directory will be loaded and merged. Cannot be used with --tools-file, or --tools-files.")
 	flags.Var(&cmd.cfg.LogLevel, "log-level", "Specify the minimum level logged. Allowed: 'DEBUG', 'INFO', 'WARN', 'ERROR'.")
 	flags.Var(&cmd.cfg.LoggingFormat, "logging-format", "Specify logging format to use. Allowed: 'standard' or 'JSON'.")
 	flags.BoolVar(&cmd.cfg.TelemetryGCP, "telemetry-gcp", false, "Enable exporting directly to Google Cloud Monitoring.")
 	flags.StringVar(&cmd.cfg.TelemetryOTLP, "telemetry-otlp", "", "Enable exporting using OpenTelemetry Protocol (OTLP) to the specified endpoint (e.g. 'http://127.0.0.1:4318')")
 	flags.StringVar(&cmd.cfg.TelemetryServiceName, "telemetry-service-name", "toolbox", "Sets the value of the service.name resource attribute for telemetry data.")
-
 	// Fetch prebuilt tools sources to customize the help description
 	prebuiltHelp := fmt.Sprintf(
-		"Use a prebuilt tool configuration by source type. Cannot be used with --tools-file. Allowed: '%s'.",
+		"Use a prebuilt tool configuration by source type. Allowed: '%s'.",
 		strings.Join(prebuiltconfigs.GetPrebuiltSources(), "', '"),
 	)
 	flags.StringVar(&cmd.prebuiltConfig, "prebuilt", "", prebuiltHelp)
 	flags.BoolVar(&cmd.cfg.Stdio, "stdio", false, "Listens via MCP STDIO instead of acting as a remote HTTP server.")
 	flags.BoolVar(&cmd.cfg.DisableReload, "disable-reload", false, "Disables dynamic reloading of tools file.")
 	flags.BoolVar(&cmd.cfg.UI, "ui", false, "Launches the Toolbox UI web server.")
+	flags.StringSliceVar(&cmd.cfg.AllowedOrigins, "allowed-origins", []string{"*"}, "Specifies a list of origins permitted to access this server. Defaults to '*'.")
 
 	// wrap RunE command so that we have access to original Command object
 	cmd.RunE = func(*cobra.Command, []string) error { return run(cmd) }
@@ -325,12 +390,13 @@ type ToolsFile struct {
 	AuthServices server.AuthServiceConfigs `yaml:"authServices"`
 	Tools        server.ToolConfigs        `yaml:"tools"`
 	Toolsets     server.ToolsetConfigs     `yaml:"toolsets"`
+	Prompts      server.PromptConfigs      `yaml:"prompts"`
 }
 
 // parseEnv replaces environment variables ${ENV_NAME} with their values.
 // also support ${ENV_NAME:default_value}.
 func parseEnv(input string) (string, error) {
-	re := regexp.MustCompile(`\$\{(\w+)(:(\w*))?\}`)
+	re := regexp.MustCompile(`\$\{(\w+)(:([^}]*))?\}`)
 
 	var err error
 	output := re.ReplaceAllStringFunc(input, func(match string) string {
@@ -341,7 +407,7 @@ func parseEnv(input string) (string, error) {
 		if value, found := os.LookupEnv(variableName); found {
 			return value
 		}
-		if parts[2] != "" {
+		if len(parts) >= 4 && parts[2] != "" {
 			return parts[3]
 		}
 		err = fmt.Errorf("environment variable not found: %q", variableName)
@@ -377,6 +443,7 @@ func mergeToolsFiles(files ...ToolsFile) (ToolsFile, error) {
 		AuthServices: make(server.AuthServiceConfigs),
 		Tools:        make(server.ToolConfigs),
 		Toolsets:     make(server.ToolsetConfigs),
+		Prompts:      make(server.PromptConfigs),
 	}
 
 	var conflicts []string
@@ -396,6 +463,9 @@ func mergeToolsFiles(files ...ToolsFile) (ToolsFile, error) {
 			if _, exists := merged.AuthSources[name]; exists {
 				conflicts = append(conflicts, fmt.Sprintf("authSource '%s' (file #%d)", name, fileIndex+1))
 			} else {
+				if merged.AuthSources == nil {
+					merged.AuthSources = make(server.AuthServiceConfigs)
+				}
 				merged.AuthSources[name] = authSource
 			}
 		}
@@ -426,11 +496,20 @@ func mergeToolsFiles(files ...ToolsFile) (ToolsFile, error) {
 				merged.Toolsets[name] = toolset
 			}
 		}
+
+		// Check for conflicts and merge prompts
+		for name, prompt := range file.Prompts {
+			if _, exists := merged.Prompts[name]; exists {
+				conflicts = append(conflicts, fmt.Sprintf("prompt '%s' (file #%d)", name, fileIndex+1))
+			} else {
+				merged.Prompts[name] = prompt
+			}
+		}
 	}
 
 	// If conflicts were detected, return an error
 	if len(conflicts) > 0 {
-		return ToolsFile{}, fmt.Errorf("resource conflicts detected:\n  - %s\n\nPlease ensure each source, authService, tool, and toolset has a unique name across all files", strings.Join(conflicts, "\n  - "))
+		return ToolsFile{}, fmt.Errorf("resource conflicts detected:\n  - %s\n\nPlease ensure each source, authService, tool, toolset and prompt has a unique name across all files", strings.Join(conflicts, "\n  - "))
 	}
 
 	return merged, nil
@@ -504,14 +583,14 @@ func handleDynamicReload(ctx context.Context, toolsFile ToolsFile, s *server.Ser
 		panic(err)
 	}
 
-	sourcesMap, authServicesMap, toolsMap, toolsetsMap, err := validateReloadEdits(ctx, toolsFile)
+	sourcesMap, authServicesMap, toolsMap, toolsetsMap, promptsMap, promptsetsMap, err := validateReloadEdits(ctx, toolsFile)
 	if err != nil {
 		errMsg := fmt.Errorf("unable to validate reloaded edits: %w", err)
 		logger.WarnContext(ctx, errMsg.Error())
 		return err
 	}
 
-	s.ResourceMgr.SetResources(sourcesMap, authServicesMap, toolsMap, toolsetsMap)
+	s.ResourceMgr.SetResources(sourcesMap, authServicesMap, toolsMap, toolsetsMap, promptsMap, promptsetsMap)
 
 	return nil
 }
@@ -519,7 +598,7 @@ func handleDynamicReload(ctx context.Context, toolsFile ToolsFile, s *server.Ser
 // validateReloadEdits checks that the reloaded tools file configs can initialized without failing
 func validateReloadEdits(
 	ctx context.Context, toolsFile ToolsFile,
-) (map[string]sources.Source, map[string]auth.AuthService, map[string]tools.Tool, map[string]tools.Toolset, error,
+) (map[string]sources.Source, map[string]auth.AuthService, map[string]tools.Tool, map[string]tools.Toolset, map[string]prompts.Prompt, map[string]prompts.Promptset, error,
 ) {
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
@@ -542,16 +621,17 @@ func validateReloadEdits(
 		AuthServiceConfigs: toolsFile.AuthServices,
 		ToolConfigs:        toolsFile.Tools,
 		ToolsetConfigs:     toolsFile.Toolsets,
+		PromptConfigs:      toolsFile.Prompts,
 	}
 
-	sourcesMap, authServicesMap, toolsMap, toolsetsMap, err := server.InitializeConfigs(ctx, reloadedConfig)
+	sourcesMap, authServicesMap, toolsMap, toolsetsMap, promptsMap, promptsetsMap, err := server.InitializeConfigs(ctx, reloadedConfig)
 	if err != nil {
 		errMsg := fmt.Errorf("unable to initialize reloaded configs: %w", err)
 		logger.WarnContext(ctx, errMsg.Error())
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 
-	return sourcesMap, authServicesMap, toolsMap, toolsetsMap, nil
+	return sourcesMap, authServicesMap, toolsMap, toolsetsMap, promptsMap, promptsetsMap, nil
 }
 
 // watchChanges checks for changes in the provided yaml tools file(s) or folder.
@@ -762,16 +842,10 @@ func run(cmd *Command) error {
 		}
 	}()
 
-	var toolsFile ToolsFile
+	var allToolsFiles []ToolsFile
 
+	// Load Prebuilt Configuration
 	if cmd.prebuiltConfig != "" {
-		// Make sure --prebuilt and --tools-file/--tools-files/--tools-folder flags are mutually exclusive
-		if cmd.tools_file != "" || len(cmd.tools_files) > 0 || cmd.tools_folder != "" {
-			errMsg := fmt.Errorf("--prebuilt and --tools-file/--tools-files/--tools-folder flags cannot be used simultaneously")
-			cmd.logger.ErrorContext(ctx, errMsg.Error())
-			return errMsg
-		}
-		// Use prebuilt tools
 		buf, err := prebuiltconfigs.Get(cmd.prebuiltConfig)
 		if err != nil {
 			cmd.logger.ErrorContext(ctx, err.Error())
@@ -782,71 +856,96 @@ func run(cmd *Command) error {
 		// Append prebuilt.source to Version string for the User Agent
 		cmd.cfg.Version += "+prebuilt." + cmd.prebuiltConfig
 
-		toolsFile, err = parseToolsFile(ctx, buf)
+		parsed, err := parseToolsFile(ctx, buf)
 		if err != nil {
 			errMsg := fmt.Errorf("unable to parse prebuilt tool configuration: %w", err)
 			cmd.logger.ErrorContext(ctx, errMsg.Error())
 			return errMsg
 		}
-	} else if len(cmd.tools_files) > 0 {
-		// Make sure --tools-file, --tools-files, and --tools-folder flags are mutually exclusive
-		if cmd.tools_file != "" || cmd.tools_folder != "" {
-			errMsg := fmt.Errorf("--tools-file, --tools-files, and --tools-folder flags cannot be used simultaneously")
-			cmd.logger.ErrorContext(ctx, errMsg.Error())
-			return errMsg
-		}
-
-		// Use multiple tools files
-		cmd.logger.InfoContext(ctx, fmt.Sprintf("Loading and merging %d tool configuration files", len(cmd.tools_files)))
-		var err error
-		toolsFile, err = loadAndMergeToolsFiles(ctx, cmd.tools_files)
-		if err != nil {
-			cmd.logger.ErrorContext(ctx, err.Error())
-			return err
-		}
-	} else if cmd.tools_folder != "" {
-		// Make sure --tools-folder and other flags are mutually exclusive
-		if cmd.tools_file != "" || len(cmd.tools_files) > 0 {
-			errMsg := fmt.Errorf("--tools-file, --tools-files, and --tools-folder flags cannot be used simultaneously")
-			cmd.logger.ErrorContext(ctx, errMsg.Error())
-			return errMsg
-		}
-
-		// Use tools folder
-		cmd.logger.InfoContext(ctx, fmt.Sprintf("Loading and merging all YAML files from directory: %s", cmd.tools_folder))
-		var err error
-		toolsFile, err = loadAndMergeToolsFolder(ctx, cmd.tools_folder)
-		if err != nil {
-			cmd.logger.ErrorContext(ctx, err.Error())
-			return err
-		}
-	} else {
-		// Set default value of tools-file flag to tools.yaml
-		if cmd.tools_file == "" {
-			cmd.tools_file = "tools.yaml"
-		}
-
-		// Read single tool file contents
-		buf, err := os.ReadFile(cmd.tools_file)
-		if err != nil {
-			errMsg := fmt.Errorf("unable to read tool file at %q: %w", cmd.tools_file, err)
-			cmd.logger.ErrorContext(ctx, errMsg.Error())
-			return errMsg
-		}
-
-		toolsFile, err = parseToolsFile(ctx, buf)
-		if err != nil {
-			errMsg := fmt.Errorf("unable to parse tool file at %q: %w", cmd.tools_file, err)
-			cmd.logger.ErrorContext(ctx, errMsg.Error())
-			return errMsg
-		}
+		allToolsFiles = append(allToolsFiles, parsed)
 	}
 
-	cmd.cfg.SourceConfigs, cmd.cfg.AuthServiceConfigs, cmd.cfg.ToolConfigs, cmd.cfg.ToolsetConfigs = toolsFile.Sources, toolsFile.AuthServices, toolsFile.Tools, toolsFile.Toolsets
-	authSourceConfigs := toolsFile.AuthSources
+	// Determine if Custom Files should be loaded
+	// Check for explicit custom flags
+	isCustomConfigured := cmd.tools_file != "" || len(cmd.tools_files) > 0 || cmd.tools_folder != ""
+
+	// Determine if default 'tools.yaml' should be used (No prebuilt AND No custom flags)
+	useDefaultToolsFile := cmd.prebuiltConfig == "" && !isCustomConfigured
+
+	if useDefaultToolsFile {
+		cmd.tools_file = "tools.yaml"
+		isCustomConfigured = true
+	}
+
+	// Load Custom Configurations
+	if isCustomConfigured {
+		// Enforce exclusivity among custom flags (tools-file vs tools-files vs tools-folder)
+		if (cmd.tools_file != "" && len(cmd.tools_files) > 0) ||
+			(cmd.tools_file != "" && cmd.tools_folder != "") ||
+			(len(cmd.tools_files) > 0 && cmd.tools_folder != "") {
+			errMsg := fmt.Errorf("--tools-file, --tools-files, and --tools-folder flags cannot be used simultaneously")
+			cmd.logger.ErrorContext(ctx, errMsg.Error())
+			return errMsg
+		}
+
+		var customTools ToolsFile
+		var err error
+
+		if len(cmd.tools_files) > 0 {
+			// Use tools-files
+			cmd.logger.InfoContext(ctx, fmt.Sprintf("Loading and merging %d tool configuration files", len(cmd.tools_files)))
+			customTools, err = loadAndMergeToolsFiles(ctx, cmd.tools_files)
+		} else if cmd.tools_folder != "" {
+			// Use tools-folder
+			cmd.logger.InfoContext(ctx, fmt.Sprintf("Loading and merging all YAML files from directory: %s", cmd.tools_folder))
+			customTools, err = loadAndMergeToolsFolder(ctx, cmd.tools_folder)
+		} else {
+			// Use single file (tools-file or default `tools.yaml`)
+			buf, readFileErr := os.ReadFile(cmd.tools_file)
+			if readFileErr != nil {
+				errMsg := fmt.Errorf("unable to read tool file at %q: %w", cmd.tools_file, readFileErr)
+				cmd.logger.ErrorContext(ctx, errMsg.Error())
+				return errMsg
+			}
+			customTools, err = parseToolsFile(ctx, buf)
+			if err != nil {
+				err = fmt.Errorf("unable to parse tool file at %q: %w", cmd.tools_file, err)
+			}
+		}
+
+		if err != nil {
+			cmd.logger.ErrorContext(ctx, err.Error())
+			return err
+		}
+		allToolsFiles = append(allToolsFiles, customTools)
+	}
+
+	// Merge Everything
+	// This will error if custom tools collide with prebuilt tools
+	finalToolsFile, err := mergeToolsFiles(allToolsFiles...)
+	if err != nil {
+		cmd.logger.ErrorContext(ctx, err.Error())
+		return err
+	}
+
+	cmd.cfg.SourceConfigs = finalToolsFile.Sources
+	cmd.cfg.AuthServiceConfigs = finalToolsFile.AuthServices
+	cmd.cfg.ToolConfigs = finalToolsFile.Tools
+	cmd.cfg.ToolsetConfigs = finalToolsFile.Toolsets
+	cmd.cfg.PromptConfigs = finalToolsFile.Prompts
+
+	authSourceConfigs := finalToolsFile.AuthSources
 	if authSourceConfigs != nil {
 		cmd.logger.WarnContext(ctx, "`authSources` is deprecated, use `authServices` instead")
-		cmd.cfg.AuthServiceConfigs = authSourceConfigs
+
+		for k, v := range authSourceConfigs {
+			if _, exists := cmd.cfg.AuthServiceConfigs[k]; exists {
+				errMsg := fmt.Errorf("resource conflict detected: authSource '%s' has the same name as an existing authService. Please rename your authSource", k)
+				cmd.logger.ErrorContext(ctx, errMsg.Error())
+				return errMsg
+			}
+			cmd.cfg.AuthServiceConfigs[k] = v
+		}
 	}
 
 	instrumentation, err := telemetry.CreateTelemetryInstrumentation(versionString)
@@ -897,9 +996,8 @@ func run(cmd *Command) error {
 		}()
 	}
 
-	watchDirs, watchedFiles := resolveWatcherInputs(cmd.tools_file, cmd.tools_files, cmd.tools_folder)
-
-	if !cmd.cfg.DisableReload {
+	if isCustomConfigured && !cmd.cfg.DisableReload {
+		watchDirs, watchedFiles := resolveWatcherInputs(cmd.tools_file, cmd.tools_files, cmd.tools_folder)
 		// start watching the file(s) or folder for changes to trigger dynamic reloading
 		go watchChanges(ctx, watchDirs, watchedFiles, s)
 	}

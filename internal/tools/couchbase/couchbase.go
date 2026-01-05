@@ -16,14 +16,13 @@ package couchbase
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/couchbase/gocb/v2"
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/sources/couchbase"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "couchbase-sql"
@@ -44,23 +43,18 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	CouchbaseScope() *gocb.Scope
-	CouchbaseQueryScanConsistency() uint
+	RunSQL(string, parameters.ParamValues) (any, error)
 }
 
-// validate compatible sources are still compatible
-var _ compatibleSource = &couchbase.Source{}
-
-var compatibleSources = [...]string{couchbase.SourceKind}
-
 type Config struct {
-	Name               string           `yaml:"name" validate:"required"`
-	Kind               string           `yaml:"kind" validate:"required"`
-	Source             string           `yaml:"source" validate:"required"`
-	Description        string           `yaml:"description" validate:"required"`
-	Statement          string           `yaml:"statement" validate:"required"`
-	AuthRequired       []string         `yaml:"authRequired"`
-	Parameters         tools.Parameters `yaml:"parameters"`
-	TemplateParameters tools.Parameters `yaml:"templateParameters"`
+	Name               string                `yaml:"name" validate:"required"`
+	Kind               string                `yaml:"kind" validate:"required"`
+	Source             string                `yaml:"source" validate:"required"`
+	Description        string                `yaml:"description" validate:"required"`
+	Statement          string                `yaml:"statement" validate:"required"`
+	AuthRequired       []string              `yaml:"authRequired"`
+	Parameters         parameters.Parameters `yaml:"parameters"`
+	TemplateParameters parameters.Parameters `yaml:"templateParameters"`
 }
 
 // validate interface
@@ -71,37 +65,18 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	allParameters, paramManifest, err := tools.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
+	allParameters, paramManifest, err := parameters.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
 	if err != nil {
 		return nil, err
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 	// finish tool setup
 	t := Tool{
-		Name:                 cfg.Name,
-		Kind:                 kind,
-		Parameters:           cfg.Parameters,
-		TemplateParameters:   cfg.TemplateParameters,
-		AllParams:            allParameters,
-		Statement:            cfg.Statement,
-		Scope:                s.CouchbaseScope(),
-		QueryScanConsistency: s.CouchbaseQueryScanConsistency(),
-		AuthRequired:         cfg.AuthRequired,
-		manifest:             tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:          mcpManifest,
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
@@ -110,53 +85,37 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name               string           `yaml:"name"`
-	Kind               string           `yaml:"kind"`
-	Parameters         tools.Parameters `yaml:"parameters"`
-	TemplateParameters tools.Parameters `yaml:"templateParameters"`
-	AllParams          tools.Parameters `yaml:"allParams"`
-	AuthRequired       []string         `yaml:"authRequired"`
-
-	Scope                *gocb.Scope
-	QueryScanConsistency uint
-	Statement            string
-	manifest             tools.Manifest
-	mcpManifest          tools.McpManifest
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	namedParamsMap := params.AsMap()
-	newStatement, err := tools.ResolveTemplateParams(t.TemplateParameters, t.Statement, namedParamsMap)
+	newStatement, err := parameters.ResolveTemplateParams(t.TemplateParameters, t.Statement, namedParamsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract template params %w", err)
 	}
 
-	newParams, err := tools.GetParams(t.Parameters, namedParamsMap)
+	newParams, err := parameters.GetParams(t.Parameters, namedParamsMap)
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract standard params %w", err)
 	}
-	results, err := t.Scope.Query(newStatement, &gocb.QueryOptions{
-		ScanConsistency: gocb.QueryScanConsistency(t.QueryScanConsistency),
-		NamedParameters: newParams.AsMap(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
-	}
-
-	var out []any
-	for results.Next() {
-		var result json.RawMessage
-		err := results.Row(&result)
-		if err != nil {
-			return nil, fmt.Errorf("error processing row: %w", err)
-		}
-		out = append(out, result)
-	}
-	return out, nil
+	return source.RunSQL(newStatement, newParams)
 }
 
-func (t Tool) ParseParams(data map[string]any, claimsMap map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claimsMap)
+func (t Tool) ParseParams(data map[string]any, claimsMap map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claimsMap)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -171,6 +130,10 @@ func (t Tool) Authorized(verifiedAuthSources []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthSources)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

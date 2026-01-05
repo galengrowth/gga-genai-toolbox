@@ -21,8 +21,7 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	redissrc "github.com/googleapis/genai-toolbox/internal/sources/redis"
 	"github.com/googleapis/genai-toolbox/internal/tools"
-	jsoniter "github.com/json-iterator/go"
-	"github.com/redis/go-redis/v9"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "redis"
@@ -43,21 +42,17 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	RedisClient() redissrc.RedisClient
+	RunCommand(context.Context, [][]any) (any, error)
 }
 
-// validate compatible sources are still compatible
-var _ compatibleSource = &redissrc.Source{}
-
-var compatibleSources = [...]string{redissrc.SourceKind}
-
 type Config struct {
-	Name         string           `yaml:"name" validate:"required"`
-	Kind         string           `yaml:"kind" validate:"required"`
-	Source       string           `yaml:"source" validate:"required"`
-	Description  string           `yaml:"description" validate:"required"`
-	Commands     [][]string       `yaml:"commands" validate:"required"`
-	AuthRequired []string         `yaml:"authRequired"`
-	Parameters   tools.Parameters `yaml:"parameters"`
+	Name         string                `yaml:"name" validate:"required"`
+	Kind         string                `yaml:"kind" validate:"required"`
+	Source       string                `yaml:"source" validate:"required"`
+	Description  string                `yaml:"description" validate:"required"`
+	Commands     [][]string            `yaml:"commands" validate:"required"`
+	AuthRequired []string              `yaml:"authRequired"`
+	Parameters   parameters.Parameters `yaml:"parameters"`
 }
 
 // validate interface
@@ -68,30 +63,13 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, cfg.Parameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, cfg.Parameters, nil)
 
 	// finish tool setup
 	t := Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		Parameters:   cfg.Parameters,
-		Commands:     cfg.Commands,
-		AuthRequired: cfg.AuthRequired,
-		Client:       s.RedisClient(),
-		manifest:     tools.Manifest{Description: cfg.Description, Parameters: cfg.Parameters.Manifest(), AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
+		Config:      cfg,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: cfg.Parameters.Manifest(), AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}
 	return t, nil
 }
@@ -100,64 +78,26 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name         string           `yaml:"name"`
-	Kind         string           `yaml:"kind"`
-	AuthRequired []string         `yaml:"authRequired"`
-	Parameters   tools.Parameters `yaml:"parameters"`
-
-	Client      redissrc.RedisClient
-	Commands    [][]string
+	Config
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	cmds, err := replaceCommandsParams(t.Commands, t.Parameters, params)
 	if err != nil {
 		return nil, fmt.Errorf("error replacing commands' parameters: %s", err)
 	}
-
-	// Execute commands
-	responses := make([]*redis.Cmd, len(cmds))
-	for i, cmd := range cmds {
-		responses[i] = t.Client.Do(ctx, cmd...)
-	}
-	// Parse responses
-	out := make([]any, len(t.Commands))
-	for i, resp := range responses {
-		if err := resp.Err(); err != nil {
-			// Add error from each command to `errSum`
-			errString := fmt.Sprintf("error from executing command at index %d: %s", i, err)
-			out[i] = errString
-			continue
-		}
-		val, err := resp.Result()
-		if err != nil {
-			return nil, fmt.Errorf("error getting result: %s", err)
-		}
-		// If result is a map, convert map[any]any to map[string]any
-		// Because the Go's built-in json/encoding marshalling doesn't support
-		// map[any]any as an input
-		var strMap map[string]any
-		var json = jsoniter.ConfigCompatibleWithStandardLibrary
-		mapStr, err := json.Marshal(val)
-		if err != nil {
-			return nil, fmt.Errorf("error marshalling result: %s", err)
-		}
-		err = json.Unmarshal(mapStr, &strMap)
-		if err != nil {
-			// result is not a map
-			out[i] = val
-			continue
-		}
-		out[i] = strMap
-	}
-
-	return out, nil
+	return source.RunCommand(ctx, cmds)
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.Parameters, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.Parameters, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -172,13 +112,13 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
 }
 
 // replaceCommandsParams is a helper function to replace parameters in the commands
 
-func replaceCommandsParams(commands [][]string, params tools.Parameters, paramValues tools.ParamValues) ([][]any, error) {
+func replaceCommandsParams(commands [][]string, params parameters.Parameters, paramValues parameters.ParamValues) ([][]any, error) {
 	paramMap := paramValues.AsMapWithDollarPrefix()
 	typeMap := make(map[string]string, len(params))
 	for _, p := range params {
@@ -208,4 +148,12 @@ func replaceCommandsParams(commands [][]string, params tools.Parameters, paramVa
 		newCommands[i] = newCmd
 	}
 	return newCommands, nil
+}
+
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }

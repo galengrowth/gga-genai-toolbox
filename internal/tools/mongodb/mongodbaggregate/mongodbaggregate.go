@@ -20,7 +20,7 @@ import (
 	"slices"
 
 	"github.com/goccy/go-yaml"
-	mongosrc "github.com/googleapis/genai-toolbox/internal/sources/mongodb"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 
@@ -44,18 +44,22 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	MongoClient() *mongo.Client
+}
+
 type Config struct {
-	Name            string           `yaml:"name" validate:"required"`
-	Kind            string           `yaml:"kind" validate:"required"`
-	Source          string           `yaml:"source" validate:"required"`
-	AuthRequired    []string         `yaml:"authRequired" validate:"required"`
-	Description     string           `yaml:"description" validate:"required"`
-	Database        string           `yaml:"database" validate:"required"`
-	Collection      string           `yaml:"collection" validate:"required"`
-	PipelinePayload string           `yaml:"pipelinePayload" validate:"required"`
-	PipelineParams  tools.Parameters `yaml:"pipelineParams" validate:"required"`
-	Canonical       bool             `yaml:"canonical"`
-	ReadOnly        bool             `yaml:"readOnly"`
+	Name            string                `yaml:"name" validate:"required"`
+	Kind            string                `yaml:"kind" validate:"required"`
+	Source          string                `yaml:"source" validate:"required"`
+	AuthRequired    []string              `yaml:"authRequired" validate:"required"`
+	Description     string                `yaml:"description" validate:"required"`
+	Database        string                `yaml:"database" validate:"required"`
+	Collection      string                `yaml:"collection" validate:"required"`
+	PipelinePayload string                `yaml:"pipelinePayload" validate:"required"`
+	PipelineParams  parameters.Parameters `yaml:"pipelineParams" validate:"required"`
+	Canonical       bool                  `yaml:"canonical"`
+	ReadOnly        bool                  `yaml:"readOnly"`
 }
 
 // validate interface
@@ -66,18 +70,6 @@ func (cfg Config) ToolConfigKind() string {
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(*mongosrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `mongodb`", kind)
-	}
-
 	// Create a slice for all parameters
 	allParameters := slices.Concat(cfg.PipelineParams)
 
@@ -85,26 +77,18 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	paramManifest := allParameters.Manifest()
 
 	if paramManifest == nil {
-		paramManifest = make([]tools.ParameterManifest, 0)
+		paramManifest = make([]parameters.ParameterManifest, 0)
 	}
 
 	// Create MCP manifest
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 
 	// finish tool setup
 	return Tool{
-		Name:            cfg.Name,
-		Kind:            kind,
-		AuthRequired:    cfg.AuthRequired,
-		Collection:      cfg.Collection,
-		PipelinePayload: cfg.PipelinePayload,
-		PipelineParams:  cfg.PipelineParams,
-		Canonical:       cfg.Canonical,
-		ReadOnly:        cfg.ReadOnly,
-		AllParams:       allParameters,
-		database:        s.Client.Database(cfg.Database),
-		manifest:        tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:     mcpManifest,
+		Config:      cfg,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}, nil
 }
 
@@ -112,26 +96,21 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name            string           `yaml:"name"`
-	Kind            string           `yaml:"kind"`
-	Description     string           `yaml:"description"`
-	AuthRequired    []string         `yaml:"authRequired"`
-	Collection      string           `yaml:"collection"`
-	PipelinePayload string           `yaml:"pipelinePayload"`
-	PipelineParams  tools.Parameters `yaml:"pipelineParams"`
-	Canonical       bool             `yaml:"canonical"`
-	ReadOnly        bool             `yaml:"readOnly"`
-	AllParams       tools.Parameters `yaml:"allParams"`
-
-	database    *mongo.Database
+	Config
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Kind)
+	if err != nil {
+		return nil, err
+	}
+
 	paramsMap := params.AsMap()
 
-	pipelineString, err := tools.PopulateTemplateWithJSON("MongoDBAggregatePipeline", t.PipelinePayload, paramsMap)
+	pipelineString, err := parameters.PopulateTemplateWithJSON("MongoDBAggregatePipeline", t.PipelinePayload, paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("error populating pipeline: %s", err)
 	}
@@ -153,7 +132,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 		}
 	}
 
-	cur, err := t.database.Collection(t.Collection).Aggregate(ctx, pipeline)
+	cur, err := source.MongoClient().Database(t.Database).Collection(t.Collection).Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, err
 	}
@@ -183,8 +162,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return final, err
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.AllParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.AllParams, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -199,6 +178,14 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
 }
