@@ -445,8 +445,10 @@ func httpHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		case jsonrpc.INVALID_REQUEST:
 			errStr := err.Error()
 			if errors.Is(err, util.ErrUnauthorized) {
+				s.setWWWAuthenticateForUnauthorized(w, r)
 				w.WriteHeader(http.StatusUnauthorized)
 			} else if strings.Contains(errStr, "Error 401") {
+				s.setWWWAuthenticateForUnauthorized(w, r)
 				w.WriteHeader(http.StatusUnauthorized)
 			} else if strings.Contains(errStr, "Error 403") {
 				w.WriteHeader(http.StatusForbidden)

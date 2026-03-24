@@ -49,6 +49,7 @@ type Server struct {
 	instrumentation *telemetry.Instrumentation
 	sseManager      *sseManager
 	ResourceMgr     *ResourceManager
+	oauthPRM        *oauthProtectedResourceConfig
 }
 
 // ResourceManager contains available resources for the server. Should be initialized with NewResourceManager().
@@ -483,6 +484,11 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("unable to initialize configs: %w", err)
 	}
 
+	oauthPRM, err := parseOAuthProtectedResourceMetadata(cfg.Custom, authServicesMap)
+	if err != nil {
+		return nil, err
+	}
+
 	addr := net.JoinHostPort(cfg.Address, strconv.Itoa(cfg.Port))
 	srv := &http.Server{Addr: addr, Handler: r}
 
@@ -498,6 +504,10 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		instrumentation: instrumentation,
 		sseManager:      sseManager,
 		ResourceMgr:     resourceManager,
+		oauthPRM:        oauthPRM,
+	}
+	if oauthPRM != nil {
+		r.Get("/.well-known/oauth-protected-resource", serveOAuthProtectedResource(oauthPRM))
 	}
 	// control plane
 	apiR, err := apiRouter(s)

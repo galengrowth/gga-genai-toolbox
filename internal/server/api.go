@@ -244,6 +244,7 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		}
 		err = fmt.Errorf("tool invocation not authorized: %s", reason)
 		s.logger.DebugContext(ctx, err.Error())
+		s.setWWWAuthenticateForUnauthorized(w, r)
 		_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
 		return
 	}
@@ -263,6 +264,7 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		// If auth error, return 401
 		if errors.Is(err, util.ErrUnauthorized) {
 			s.logger.DebugContext(ctx, fmt.Sprintf("error parsing authenticated parameters from ID token: %s", err))
+			s.setWWWAuthenticateForUnauthorized(w, r)
 			_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
 			return
 		}

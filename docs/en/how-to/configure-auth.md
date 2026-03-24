@@ -22,6 +22,21 @@ The server will:
 3. Enforce issuer (`iss`) and audience (`aud`).
 4. Expose the decoded claims to downstream billing / quota logic.
 
+### OAuth Protected Resource Metadata (RFC 9728)
+
+For MCP clients that discover authorization via `/.well-known/oauth-protected-resource`, enable this under the top-level `custom:` block in `tools.yaml`:
+
+```yaml
+custom:
+  oauthProtectedResourceMetadata: true
+  oauthResource: "https://your-public-host/mcp"   # protected resource identifier (often your MCP HTTPS URL)
+  # oauthAuthorizationServers:                    # optional: omit to derive from authzero issuer(s)
+  #   - "https://your-tenant.us.auth0.com/"
+  # oauthScopesSupported: ["openid", "profile", "email"]   # optional
+```
+
+When enabled, the server serves `GET /.well-known/oauth-protected-resource` and adds a `WWW-Authenticate` hint on MCP `401` responses pointing at that document. If `oauthAuthorizationServers` is omitted, issuers are derived from configured `authzero` services (`https://<domain>/`).
+
 ## 2. Google (kind: google)
 Example (simplified – fill in fields required by Google config):
 ```yaml
