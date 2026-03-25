@@ -37,6 +37,23 @@ custom:
 
 When enabled, the server serves `GET /.well-known/oauth-protected-resource` and adds a `WWW-Authenticate` hint on MCP `401` responses pointing at that document. If `oauthAuthorizationServers` is omitted, issuers are derived from configured `authzero` services (`https://<domain>/`).
 
+### Claude.ai OAuth proxy (`/authorize`, `/token`, `/register`)
+
+Claude.ai’s web MCP client may call `GET /authorize`, `POST /token`, and `POST /register` on **your MCP host** instead of your IdP (e.g. Auth0), even when metadata points elsewhere ([upstream issue](https://github.com/anthropics/claude-ai-mcp/issues/82)). Enable this workaround under `custom:`:
+
+```yaml
+custom:
+  oauthClaudeAuthProxy: true
+  # Issuer base URL used to fetch /.well-known/openid-configuration (omit if you have authzero — it will be derived)
+  # oauthProxyIssuer: "https://your-tenant.us.auth0.com"
+  # Or set endpoints explicitly instead of discovery:
+  # oauthProxyAuthorizationEndpoint: "https://your-tenant.us.auth0.com/authorize"
+  # oauthProxyTokenEndpoint: "https://your-tenant.us.auth0.com/oauth/token"
+  # oauthProxyRegistrationEndpoint: ""   # optional; from discovery if omitted
+```
+
+When `oauthClaudeAuthProxy` is true, Toolbox discovers `authorization_endpoint`, `token_endpoint`, and `registration_endpoint` from OIDC metadata (unless overridden) and forwards those paths on your server to the real IdP.
+
 ## 2. Google (kind: google)
 Example (simplified – fill in fields required by Google config):
 ```yaml

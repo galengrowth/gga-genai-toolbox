@@ -48,8 +48,9 @@ type Server struct {
 	logger          log.Logger
 	instrumentation *telemetry.Instrumentation
 	sseManager      *sseManager
-	ResourceMgr     *ResourceManager
-	oauthPRM        *oauthProtectedResourceConfig
+	ResourceMgr      *ResourceManager
+	oauthPRM         *oauthProtectedResourceConfig
+	oauthClaudeProxy *claudeOAuthProxy
 }
 
 // ResourceManager contains available resources for the server. Should be initialized with NewResourceManager().
@@ -489,6 +490,11 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		return nil, err
 	}
 
+	oauthProxy, err := buildClaudeOAuthProxy(ctx, cfg.Custom, authServicesMap)
+	if err != nil {
+		return nil, err
+	}
+
 	addr := net.JoinHostPort(cfg.Address, strconv.Itoa(cfg.Port))
 	srv := &http.Server{Addr: addr, Handler: r}
 
@@ -503,11 +509,17 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		logger:          l,
 		instrumentation: instrumentation,
 		sseManager:      sseManager,
-		ResourceMgr:     resourceManager,
-		oauthPRM:        oauthPRM,
+		ResourceMgr:      resourceManager,
+		oauthPRM:         oauthPRM,
+		oauthClaudeProxy: oauthProxy,
 	}
 	if oauthPRM != nil {
 		r.Get("/.well-known/oauth-protected-resource", serveOAuthProtectedResource(oauthPRM))
+	}
+	if oauthProxy != nil {
+		r.Get("/authorize", oauthProxy.authorizeRedirect)
+		r.Post("/token", oauthProxy.proxyToken)
+		r.Post("/register", oauthProxy.proxyRegister)
 	}
 	// control plane
 	apiR, err := apiRouter(s)
