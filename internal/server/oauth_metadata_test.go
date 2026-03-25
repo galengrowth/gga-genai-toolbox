@@ -46,6 +46,26 @@ func TestParseOAuthProtectedResourceMetadata_ExplicitServers(t *testing.T) {
 	}
 }
 
+func TestParseOAuthProtectedResourceMetadata_OptionalDocsAndName(t *testing.T) {
+	prm, err := parseOAuthProtectedResourceMetadata(map[string]any{
+		"oauthProtectedResourceMetadata": true,
+		"oauthResource":                  "https://api.example.com",
+		"oauthAuthorizationServers":      []any{"https://issuer.example.com/"},
+		"oauthScopesSupported":           []any{"mcp:read", "mcp:tools"},
+		"oauthResourceDocumentation":   "https://api.example.com/docs",
+		"oauthResourceName":            "Example MCP",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prm.ResourceDocumentation != "https://api.example.com/docs" || prm.ResourceName != "Example MCP" {
+		t.Fatalf("got doc=%q name=%q", prm.ResourceDocumentation, prm.ResourceName)
+	}
+	if len(prm.ScopesSupported) != 2 {
+		t.Fatalf("scopes: %+v", prm.ScopesSupported)
+	}
+}
+
 func TestParseOAuthProtectedResourceMetadata_MissingResource(t *testing.T) {
 	_, err := parseOAuthProtectedResourceMetadata(map[string]any{
 		"oauthProtectedResourceMetadata": true,

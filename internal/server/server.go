@@ -520,6 +520,11 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		r.Get("/authorize", oauthProxy.authorizeRedirect)
 		r.Post("/token", oauthProxy.proxyToken)
 		r.Post("/register", oauthProxy.proxyRegister)
+		r.Get("/oauthproxy/ping", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"claude_oauth_proxy":true}`))
+		})
+		l.InfoContext(ctx, "Claude OAuth proxy enabled: GET /authorize, POST /token, POST /register, GET /oauthproxy/ping")
 	}
 	// control plane
 	apiR, err := apiRouter(s)

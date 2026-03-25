@@ -27,9 +27,11 @@ import (
 // oauthProtectedResourceConfig holds RFC 9728 OAuth 2.0 Protected Resource Metadata
 // for MCP / OAuth clients that discover authorization servers via /.well-known/oauth-protected-resource.
 type oauthProtectedResourceConfig struct {
-	Resource             string
-	AuthorizationServers []string
-	ScopesSupported      []string
+	Resource                 string
+	AuthorizationServers     []string
+	ScopesSupported          []string
+	ResourceDocumentation    string // RFC 9728 optional: URL of human-readable documentation
+	ResourceName             string // non-standard; some clients display a friendly name
 }
 
 func parseOAuthProtectedResourceMetadata(custom map[string]any, authServices map[string]auth.AuthService) (*oauthProtectedResourceConfig, error) {
@@ -60,10 +62,15 @@ func parseOAuthProtectedResourceMetadata(custom map[string]any, authServices map
 		return nil, fmt.Errorf("custom.oauthScopesSupported: %w", err)
 	}
 
+	docURL := strings.TrimSpace(strFromAny(custom["oauthResourceDocumentation"]))
+	name := strings.TrimSpace(strFromAny(custom["oauthResourceName"]))
+
 	return &oauthProtectedResourceConfig{
-		Resource:             resource,
-		AuthorizationServers: servers,
-		ScopesSupported:      scopes,
+		Resource:              resource,
+		AuthorizationServers:  servers,
+		ScopesSupported:       scopes,
+		ResourceDocumentation: docURL,
+		ResourceName:          name,
 	}, nil
 }
 
@@ -185,6 +192,12 @@ func serveOAuthProtectedResource(prm *oauthProtectedResourceConfig) http.Handler
 		}
 		if len(prm.ScopesSupported) > 0 {
 			doc["scopes_supported"] = prm.ScopesSupported
+		}
+		if prm.ResourceDocumentation != "" {
+			doc["resource_documentation"] = prm.ResourceDocumentation
+		}
+		if prm.ResourceName != "" {
+			doc["resource_name"] = prm.ResourceName
 		}
 		_ = json.NewEncoder(w).Encode(doc)
 	}

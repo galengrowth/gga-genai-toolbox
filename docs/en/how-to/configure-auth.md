@@ -29,10 +29,12 @@ For MCP clients that discover authorization via `/.well-known/oauth-protected-re
 ```yaml
 custom:
   oauthProtectedResourceMetadata: true
-  oauthResource: "https://your-public-host/mcp"   # protected resource identifier (often your MCP HTTPS URL)
+  oauthResource: "https://your-public-host/mcp"   # protected resource identifier (RFC 9728 `resource`; can be origin or /mcp URL)
   # oauthAuthorizationServers:                    # optional: omit to derive from authzero issuer(s)
   #   - "https://your-tenant.us.auth0.com/"
-  # oauthScopesSupported: ["openid", "profile", "email"]   # optional
+  # oauthScopesSupported: ["mcp:read", "mcp:tools"]   # optional; RFC 9728 scopes_supported
+  # oauthResourceDocumentation: "https://your-public-host/docs"   # optional; RFC 9728 resource_documentation
+  # oauthResourceName: "My MCP (dev)"            # optional; emitted as resource_name (non-standard, for display)
 ```
 
 When enabled, the server serves `GET /.well-known/oauth-protected-resource` and adds a `WWW-Authenticate` hint on MCP `401` responses pointing at that document. If `oauthAuthorizationServers` is omitted, issuers are derived from configured `authzero` services (`https://<domain>/`).
@@ -53,6 +55,16 @@ custom:
 ```
 
 When `oauthClaudeAuthProxy` is true, Toolbox discovers `authorization_endpoint`, `token_endpoint`, and `registration_endpoint` from OIDC metadata (unless overridden) and forwards those paths on your server to the real IdP.
+
+**If `GET /authorize` returns 404** while `GET /.well-known/oauth-protected-resource` works, the request is usually **not reaching Toolbox**: many ingresses or API gateways only forward `/mcp` to the app. You must route **at least** these prefixes to the same Toolbox upstream as `/mcp`:
+
+- `/authorize`, `/token`, `/register`
+- `/.well-known/` (for PRM and OIDC-style discovery)
+- optional: `/oauthproxy/ping` — returns `{"claude_oauth_proxy":true}` when the proxy is enabled (use this to verify routing)
+
+Example (nginx): forward the whole host to Toolbox, or add explicit `location` blocks for the paths above.
+
+Example (Kubernetes Ingress): use `path: /` with `pathType: Prefix` for the Toolbox service, or add multiple path rules so `/authorize` is not dropped by a `/mcp`-only rule.
 
 ## 2. Google (kind: google)
 Example (simplified – fill in fields required by Google config):
