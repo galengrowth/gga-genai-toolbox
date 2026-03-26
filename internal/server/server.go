@@ -423,6 +423,34 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	httpLogger := httplog.NewLogger("httplog", httpOpts)
 	r.Use(httplog.RequestLogger(httpLogger))
 
+	// Optional: log raw Bearer token for debugging (e.g. Cloud Run). Enable with custom.debugLogAuthToken: true — high risk; disable after debugging.
+	debugLogAuthToken := false
+	if v, exists := cfg.Custom["debugLogAuthToken"]; exists {
+		switch x := v.(type) {
+		case bool:
+			debugLogAuthToken = x
+		case string:
+			debugLogAuthToken = strings.ToLower(strings.TrimSpace(x)) == "true"
+		case int:
+			debugLogAuthToken = x != 0
+		}
+	}
+	if debugLogAuthToken {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				auth := r.Header.Get("Authorization")
+				const bearerLen = len("Bearer ")
+				if len(auth) > bearerLen && strings.EqualFold(auth[:bearerLen], "Bearer ") {
+					token := strings.TrimSpace(auth[bearerLen:])
+					if token != "" {
+						l.InfoContext(r.Context(), fmt.Sprintf("AUTH TOKEN:%s", token))
+					}
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
+	}
+
 	// Add middleware to set up billing and quota context from Custom config
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
