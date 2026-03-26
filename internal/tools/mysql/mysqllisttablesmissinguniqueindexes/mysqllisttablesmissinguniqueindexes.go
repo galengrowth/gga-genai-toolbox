@@ -27,6 +27,7 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqlcommon"
 	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
 const kind string = "mysql-list-tables-missing-unique-indexes"
@@ -45,9 +46,8 @@ const listTablesMissingUniqueIndexesStatement = `
 			AND tco.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
 	WHERE
 		tco.constraint_type IS NULL
-		AND tab.table_schema NOT IN('mysql', 'information_schema', 'performance_schema', 'sys')
+		AND tab.table_schema = ?
 		AND tab.table_type = 'BASE TABLE'
-		AND (COALESCE(?, '') = '' OR tab.table_schema = ?)
 	ORDER BY
 		tab.table_schema,
 		tab.table_name
@@ -106,21 +106,28 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
 	}
 
-	allParameters := tools.Parameters{
-		tools.NewStringParameterWithDefault("table_schema", "", "(Optional) The database where the check is to be performed. Check all tables visible to the current user if not specified"),
-		tools.NewIntParameterWithDefault("limit", 50, "(Optional) Max rows to return, default is 50"),
+	// get dbName from underlying config
+	dbName := ""
+	switch real := rawS.(type) {
+	case interface{ DatabaseName() string }:
+		dbName = real.DatabaseName()
+	default:
+		return nil, fmt.Errorf("cannot resolve database name from source type")
+	}
+
+	allParameters := parameters.Parameters{
+		parameters.NewIntParameterWithDefault("limit", 50, "(Optional) Max rows to return, default is 50"),
 	}
 	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
 
 	// finish tool setup
 	t := Tool{
-		Name:         cfg.Name,
-		Kind:         kind,
-		AuthRequired: cfg.AuthRequired,
-		Pool:         s.MySQLPool(),
-		allParams:    allParameters,
-		manifest:     tools.Manifest{Description: cfg.Description, Parameters: allParameters.Manifest(), AuthRequired: cfg.AuthRequired},
-		mcpManifest:  mcpManifest,
+		Config:      cfg,
+		Pool:        s.MySQLPool(),
+		allParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: allParameters.Manifest(), AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
+		DbName:      dbName,
 	}
 	return t, nil
 }
@@ -129,22 +136,17 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 var _ tools.Tool = Tool{}
 
 type Tool struct {
-	Name         string           `yaml:"name"`
-	Kind         string           `yaml:"kind"`
-	AuthRequired []string         `yaml:"authRequired"`
-	allParams    tools.Parameters `yaml:"parameters"`
-	Pool         *sql.DB
-	manifest     tools.Manifest
-	mcpManifest  tools.McpManifest
+	Config
+	allParams   parameters.Parameters `yaml:"parameters"`
+	Pool        *sql.DB
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
+	DbName      string
 }
 
-func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
 	paramsMap := params.AsMap()
 
-	table_schema, ok := paramsMap["table_schema"].(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid 'table_schema' parameter; expected a string")
-	}
 	limit, ok := paramsMap["limit"].(int)
 	if !ok {
 		return nil, fmt.Errorf("invalid 'limit' parameter; expected an integer")
@@ -155,9 +157,9 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	if err != nil {
 		return nil, fmt.Errorf("error getting logger: %s", err)
 	}
-	logger.DebugContext(ctx, "executing `%s` tool query: %s", kind, listTablesMissingUniqueIndexesStatement)
+	logger.DebugContext(ctx, fmt.Sprintf("executing `%s` tool query: %s", kind, listTablesMissingUniqueIndexesStatement))
 
-	results, err := t.Pool.QueryContext(ctx, listTablesMissingUniqueIndexesStatement, table_schema, table_schema, limit)
+	results, err := t.Pool.QueryContext(ctx, listTablesMissingUniqueIndexesStatement, t.DbName, limit)
 	if err != nil {
 		return nil, fmt.Errorf("unable to execute query: %w", err)
 	}
@@ -211,8 +213,8 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues, accessToken 
 	return out, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {
-	return tools.ParseParams(t.allParams, data, claims)
+func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+	return parameters.ParseParams(t.allParams, data, claims)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -229,4 +231,8 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 
 func (t Tool) RequiresClientAuthorization() bool {
 	return false
+}
+
+func (t Tool) ToConfig() tools.ToolConfig {
+	return t.Config
 }

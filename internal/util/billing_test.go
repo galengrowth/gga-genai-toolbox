@@ -84,6 +84,7 @@ func TestLogAndPostBilling_SendsRequest(t *testing.T) {
 	ctx = WithRequestID(ctx, "req-xyz")
 	ctx = WithUserAgent(ctx, "test/1.0")
 	ctx = WithLogger(ctx, noopLogger{})
+	ctx = WithBillingEnforcement(ctx, true)
 
 	LogAndPostBilling(ctx, "testTool", 42, "select 1")
 
@@ -130,6 +131,7 @@ func TestLogAndPostBilling_ForwardsAuthorization(t *testing.T) {
 	ctx = WithBillingEndpoint(ctx, ts.URL)
 	ctx = WithAuthorizationHeader(ctx, "Bearer test-token-123")
 	ctx = WithLogger(ctx, noopLogger{})
+	ctx = WithBillingEnforcement(ctx, true)
 
 	LogAndPostBilling(ctx, "tool", 0, "")
 

@@ -29,12 +29,12 @@ func TestCheckQuotaAndAuthorize_NoEndpoint(t *testing.T) {
 func TestCheckQuotaAndAuthorize_Success(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"remaining_rows": 10}`))
+		w.Write([]byte(`{"allowed": true}`))
 	}))
 	defer ts.Close()
 	ctx := WithQuotaEndpoint(context.Background(), ts.URL)
 	allowed, rem, _, err := CheckQuotaAndAuthorize(ctx, "tool", nil)
-	if err != nil || !allowed || rem != 10 {
+	if err != nil || !allowed || rem != -1 {
 		t.Fatalf("unexpected: allowed=%v rem=%d err=%v", allowed, rem, err)
 	}
 }

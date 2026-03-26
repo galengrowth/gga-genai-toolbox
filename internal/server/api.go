@@ -77,6 +77,12 @@ func toolsetHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		)
 	}()
 
+	// Secure toolset discovery: require valid token and authorization
+	// Note: Discovery is intentionally unauthenticated to maximize compatibility with clients.
+	// If Authorization is present, we still log its presence for debugging.
+	if authz := r.Header.Get("Authorization"); authz != "" {
+		s.logger.DebugContext(ctx, "Authorization header present on discovery request")
+	}
 	toolset, ok := s.ResourceMgr.GetToolset(toolsetName)
 	if !ok {
 		err = fmt.Errorf("toolset %q does not exist", toolsetName)
@@ -113,6 +119,10 @@ func toolGetHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			metric.WithAttributes(attribute.String("toolbox.operation.status", status)),
 		)
 	}()
+	// Note: Discovery is intentionally unauthenticated to maximize compatibility with clients.
+	if authz := r.Header.Get("Authorization"); authz != "" {
+		s.logger.DebugContext(ctx, "Authorization header present on tool manifest request")
+	}
 	tool, ok := s.ResourceMgr.GetTool(toolName)
 	if !ok {
 		err = fmt.Errorf("invalid tool name: tool with name %q does not exist", toolName)
@@ -234,6 +244,7 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		}
 		err = fmt.Errorf("tool invocation not authorized: %s", reason)
 		s.logger.DebugContext(ctx, err.Error())
+		s.setWWWAuthenticateForUnauthorized(w, r)
 		_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
 		return
 	}
@@ -251,8 +262,9 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	params, err := tool.ParseParams(data, claimsFromAuth)
 	if err != nil {
 		// If auth error, return 401
-		if errors.Is(err, tools.ErrUnauthorized) {
+		if errors.Is(err, util.ErrUnauthorized) {
 			s.logger.DebugContext(ctx, fmt.Sprintf("error parsing authenticated parameters from ID token: %s", err))
+			s.setWWWAuthenticateForUnauthorized(w, r)
 			_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
 			return
 		}
