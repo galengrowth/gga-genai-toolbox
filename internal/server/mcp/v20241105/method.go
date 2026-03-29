@@ -21,29 +21,32 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
+	"time"
 
-	"github.com/googleapis/genai-toolbox/internal/auth"
-	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
 	"github.com/googleapis/genai-toolbox/internal/prompts"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp/jsonrpc"
+	"github.com/googleapis/genai-toolbox/internal/server/resources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ProcessMethod returns a response for the request.
-func ProcessMethod(ctx context.Context, id jsonrpc.RequestId, method string, toolset tools.Toolset, tools map[string]tools.Tool, promptset prompts.Promptset, prompts map[string]prompts.Prompt, authServices map[string]auth.AuthService, body []byte, header http.Header) (any, error) {
+func ProcessMethod(ctx context.Context, id jsonrpc.RequestId, method string, toolset tools.Toolset, promptset prompts.Promptset, resourceMgr *resources.ResourceManager, body []byte, header http.Header) (any, error) {
 	switch method {
 	case PING:
 		return pingHandler(id)
 	case TOOLS_LIST:
-		return toolsListHandler(ctx, id, toolset, authServices, header, body)
+		return toolsListHandler(id, toolset, body)
 	case TOOLS_CALL:
-		return toolsCallHandler(ctx, id, tools, authServices, body, header)
+		return toolsCallHandler(ctx, id, resourceMgr, body, header)
 	case PROMPTS_LIST:
 		return promptsListHandler(ctx, id, promptset, body)
 	case PROMPTS_GET:
-		return promptsGetHandler(ctx, id, prompts, body)
+		return promptsGetHandler(ctx, id, resourceMgr, body)
 	default:
 		err := fmt.Errorf("invalid method %s", method)
 		return jsonrpc.NewError(id, jsonrpc.METHOD_NOT_FOUND, err.Error(), nil), err
@@ -59,21 +62,22 @@ func pingHandler(id jsonrpc.RequestId) (any, error) {
 	}, nil
 }
 
-func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, toolset tools.Toolset, authServices map[string]auth.AuthService, header http.Header, body []byte) (any, error) {
+func toolsListHandler(id jsonrpc.RequestId, toolset tools.Toolset, body []byte) (any, error) {
 	var req ListToolsRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		err = fmt.Errorf("invalid mcp tools list request: %w", err)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 	}
-	// Discovery is intentionally unauthenticated. Log presence of Authorization header for debugging.
-	if header != nil && header.Get("Authorization") != "" {
-		if logger, err := util.LoggerFromContext(ctx); err == nil {
-			logger.DebugContext(ctx, "Authorization header present on MCP tools.list request")
-		}
+
+	// exclude annotations from this version
+	manifests := make([]tools.McpManifest, len(toolset.McpManifest))
+	for i, m := range toolset.McpManifest {
+		m.Annotations = nil
+		manifests[i] = m
 	}
 
 	result := ListToolsResult{
-		Tools: toolset.McpManifest,
+		Tools: manifests,
 	}
 	return jsonrpc.JSONRPCResponse{
 		Jsonrpc: jsonrpc.JSONRPC_VERSION,
@@ -83,7 +87,9 @@ func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, toolset tools.T
 }
 
 // toolsCallHandler generate a response for tools call.
-func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[string]tools.Tool, authServices map[string]auth.AuthService, body []byte, header http.Header) (any, error) {
+func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *resources.ResourceManager, body []byte, header http.Header) (any, error) {
+	authServices := resourceMgr.GetAuthServiceMap()
+
 	// retrieve logger from context
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
@@ -99,27 +105,49 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	toolName := req.Params.Name
 	toolArgument := req.Params.Arguments
 	logger.DebugContext(ctx, fmt.Sprintf("tool name: %s", toolName))
-	logger.DebugContext(ctx, fmt.Sprintf("raw argument type: %T", toolArgument))
-	tool, ok := toolsMap[toolName]
+
+	// Update span name and set gen_ai attributes
+	span := trace.SpanFromContext(ctx)
+	span.SetName(fmt.Sprintf("%s %s", TOOLS_CALL, toolName))
+	span.SetAttributes(
+		attribute.String("gen_ai.tool.name", toolName),
+		attribute.String("gen_ai.operation.name", "execute_tool"),
+	)
+
+	tool, ok := resourceMgr.GetTool(toolName)
 	if !ok {
 		err = fmt.Errorf("invalid tool name: tool with name %q does not exist", toolName)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, err.Error(), nil), err
 	}
 
-	// Get access token and attach raw header to context for downstream utilities (e.g., billing)
-	authHeader := ""
-	if header != nil {
-		authHeader = header.Get("Authorization")
-	}
-	accessToken := tools.AccessToken(authHeader)
-	if authHeader != "" {
-		ctx = util.WithAuthorizationHeader(ctx, authHeader)
+	// Populate gen_ai attributes for operation duration metric
+	if genAIAttrs := util.GenAIMetricAttrsFromContext(ctx); genAIAttrs != nil {
+		genAIAttrs.OperationName = "execute_tool"
+		genAIAttrs.ToolName = toolName
 	}
 
+	// Get access token
+	authTokenHeadername, err := tool.GetAuthTokenHeaderName(resourceMgr)
+	if err != nil {
+		errMsg := fmt.Errorf("error during invocation: %w", err)
+		return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, errMsg.Error(), nil), errMsg
+	}
+	accessToken := tools.AccessToken(header.Get(authTokenHeadername))
+
 	// Check if this specific tool requires the standard authorization header
-	if tool.RequiresClientAuthorization() {
+	clientAuth, err := tool.RequiresClientAuthorization(resourceMgr)
+	if err != nil {
+		errMsg := fmt.Errorf("error during invocation: %w", err)
+		return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, errMsg.Error(), nil), errMsg
+	}
+	if clientAuth {
 		if accessToken == "" {
-			return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, "missing access token in the 'Authorization' header", nil), util.ErrUnauthorized
+			err := util.NewClientServerError(
+				"missing access token in the 'Authorization' header",
+				http.StatusUnauthorized,
+				nil,
+			)
+			return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 		}
 	}
 
@@ -132,27 +160,8 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 
 	var data map[string]any
 	if err = util.DecodeJSON(bytes.NewBuffer(aMarshal), &data); err != nil {
-		// Fallback 1: some clients send an array of {name, value}
-		var arr []map[string]any
-		if err2 := util.DecodeJSON(bytes.NewBuffer(aMarshal), &arr); err2 == nil {
-			flattened := make(map[string]any)
-			for _, item := range arr {
-				name, hasName := item["name"].(string)
-				if !hasName {
-					continue
-				}
-				if val, ok := item["value"]; ok {
-					flattened[name] = val
-				}
-			}
-			data = flattened
-		} else if bytes.Equal(bytes.TrimSpace(aMarshal), []byte("null")) || len(bytes.TrimSpace(aMarshal)) == 0 {
-			// Fallback 2: null/empty arguments -> use defaults
-			data = map[string]any{}
-		} else {
-			err = fmt.Errorf("unable to decode tools argument: %v (raw type %T)", err, req.Params.Arguments)
-			return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, err.Error(), nil), err
-		}
+		err = fmt.Errorf("unable to decode tools argument: %w", err)
+		return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
 	}
 
 	// Tool authentication
@@ -175,14 +184,6 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 		}
 	}
 
-	// Attach one set of verified claims into context for downstream utilities like billing
-	if len(claimsFromAuth) > 0 {
-		for _, c := range claimsFromAuth {
-			ctx = util.WithJWTClaims(ctx, c)
-			break
-		}
-	}
-
 	// Tool authorization check
 	verifiedAuthServices := make([]string, len(claimsFromAuth))
 	i := 0
@@ -194,53 +195,96 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, toolsMap map[st
 	// Check if any of the specified auth services is verified
 	isAuthorized := tool.Authorized(verifiedAuthServices)
 	if !isAuthorized {
-		err = fmt.Errorf("unauthorized Tool call: Please make sure your specify correct auth headers: %w", util.ErrUnauthorized)
+		err = util.NewClientServerError(
+			"unauthorized Tool call: Please make sure you specify correct auth headers",
+			http.StatusUnauthorized,
+			nil,
+		)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
 	}
 	logger.DebugContext(ctx, "tool invocation authorized")
 
-	params, err := tool.ParseParams(data, claimsFromAuth)
+	params, err := parameters.ParseParams(tool.GetParameters(), data, claimsFromAuth)
 	if err != nil {
 		err = fmt.Errorf("provided parameters were invalid: %w", err)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, err.Error(), nil), err
 	}
 	logger.DebugContext(ctx, fmt.Sprintf("invocation params: %s", params))
 
-	// Custom preflight check
-	if allowed, err := customutil.PerformPreflightCheck(ctx, toolName); !allowed {
-		if err != nil {
-			return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
-		}
-		return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, "Insufficient tokens", nil), fmt.Errorf("insufficient tokens")
+	embeddingModels := resourceMgr.GetEmbeddingModelMap()
+	params, err = tool.EmbedParams(ctx, params, embeddingModels)
+	if err != nil {
+		err = fmt.Errorf("error embedding parameters: %w", err)
+		return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, err.Error(), nil), err
 	}
 
+	// Get instrumentation for recording tool execution duration
+	instrumentation, instrumentationErr := util.InstrumentationFromContext(ctx)
+
 	// run tool invocation and generate response.
-	results, err := tool.Invoke(ctx, params, accessToken)
-	if err != nil {
-		errStr := err.Error()
-		// Missing authService tokens.
-		if errors.Is(err, util.ErrUnauthorized) {
-			return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
+	executionStart := time.Now()
+	results, err := tool.Invoke(ctx, resourceMgr, params, accessToken)
+	executionDuration := time.Since(executionStart).Seconds()
+
+	// Record tool execution duration metric
+	if instrumentationErr == nil {
+		execAttrs := []attribute.KeyValue{
+			attribute.String("gen_ai.tool.name", toolName),
 		}
-		// Upstream auth error
-		if strings.Contains(errStr, "Error 401") || strings.Contains(errStr, "Error 403") {
-			if tool.RequiresClientAuthorization() {
-				// Error with client credentials should pass down to the client
-				return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
+		// Add network protocol attributes from context
+		if genAIAttrs := util.GenAIMetricAttrsFromContext(ctx); genAIAttrs != nil {
+			if genAIAttrs.NetworkProtocolName != "" {
+				execAttrs = append(execAttrs, attribute.String("network.protocol.name", genAIAttrs.NetworkProtocolName))
 			}
-			// Auth error with ADC should raise internal 500 error
+			if genAIAttrs.NetworkProtocolVersion != "" {
+				execAttrs = append(execAttrs, attribute.String("network.protocol.version", genAIAttrs.NetworkProtocolVersion))
+			}
+		}
+		if err != nil {
+			execAttrs = append(execAttrs, attribute.String("error.type", err.Error()))
+		}
+		instrumentation.ToolExecutionDuration.Record(ctx, executionDuration, metric.WithAttributes(execAttrs...))
+	}
+
+	if err != nil {
+		var tbErr util.ToolboxError
+
+		if errors.As(err, &tbErr) {
+			switch tbErr.Category() {
+			case util.CategoryAgent:
+				// MCP - Tool execution error
+				// Return SUCCESS but with IsError: true
+				text := TextContent{
+					Type: "text",
+					Text: err.Error(),
+				}
+				return jsonrpc.JSONRPCResponse{
+					Jsonrpc: jsonrpc.JSONRPC_VERSION,
+					Id:      id,
+					Result:  CallToolResult{Content: []TextContent{text}, IsError: true},
+				}, nil
+
+			case util.CategoryServer:
+				// MCP Spec - Protocol error
+				// Return JSON-RPC ERROR
+				var clientServerErr *util.ClientServerError
+				rpcCode := jsonrpc.INTERNAL_ERROR // Default to Internal Error (-32603)
+
+				if errors.As(err, &clientServerErr) {
+					if clientServerErr.Code == http.StatusUnauthorized || clientServerErr.Code == http.StatusForbidden {
+						if clientAuth {
+							rpcCode = jsonrpc.INVALID_REQUEST
+						} else {
+							rpcCode = jsonrpc.INTERNAL_ERROR
+						}
+					}
+				}
+				return jsonrpc.NewError(id, rpcCode, err.Error(), nil), err
+			}
+		} else {
+			// Unknown error -> 500
 			return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
 		}
-
-		text := TextContent{
-			Type: "text",
-			Text: err.Error(),
-		}
-		return jsonrpc.JSONRPCResponse{
-			Jsonrpc: jsonrpc.JSONRPC_VERSION,
-			Id:      id,
-			Result:  CallToolResult{Content: []TextContent{text}, IsError: true},
-		}, nil
 	}
 
 	content := make([]TextContent, 0)
@@ -295,7 +339,7 @@ func promptsListHandler(ctx context.Context, id jsonrpc.RequestId, promptset pro
 }
 
 // promptsGetHandler handles the "prompts/get" method.
-func promptsGetHandler(ctx context.Context, id jsonrpc.RequestId, promptsMap map[string]prompts.Prompt, body []byte) (any, error) {
+func promptsGetHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *resources.ResourceManager, body []byte) (any, error) {
 	// retrieve logger from context
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
@@ -311,10 +355,22 @@ func promptsGetHandler(ctx context.Context, id jsonrpc.RequestId, promptsMap map
 
 	promptName := req.Params.Name
 	logger.DebugContext(ctx, fmt.Sprintf("prompt name: %s", promptName))
-	prompt, ok := promptsMap[promptName]
+
+	// Update span name and set gen_ai attributes
+	span := trace.SpanFromContext(ctx)
+	span.SetName(fmt.Sprintf("%s %s", PROMPTS_GET, promptName))
+	span.SetAttributes(attribute.String("gen_ai.prompt.name", promptName))
+
+	prompt, ok := resourceMgr.GetPrompt(promptName)
 	if !ok {
 		err := fmt.Errorf("prompt with name %q does not exist", promptName)
 		return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, err.Error(), nil), err
+	}
+
+	// Populate gen_ai attributes for operation duration metric
+	if genAIAttrs := util.GenAIMetricAttrsFromContext(ctx); genAIAttrs != nil {
+		genAIAttrs.OperationName = "get_prompt"
+		genAIAttrs.PromptName = promptName
 	}
 
 	// Parse the arguments provided in the request.

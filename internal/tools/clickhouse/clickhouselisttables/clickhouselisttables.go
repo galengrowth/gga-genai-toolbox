@@ -16,27 +16,23 @@ package clickhouse
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"net/http"
 
 	yaml "github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
-type compatibleSource interface {
-	ClickHousePool() *sql.DB
-}
-
-var compatibleSources = []string{"clickhouse"}
-
-const listTablesKind string = "clickhouse-list-tables"
+const listTablesType string = "clickhouse-list-tables"
 const databaseKey string = "database"
 
 func init() {
-	if !tools.Register(listTablesKind, newListTablesConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", listTablesKind))
+	if !tools.Register(listTablesType, newListTablesConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", listTablesType))
 	}
 }
 
@@ -48,9 +44,13 @@ func newListTablesConfig(ctx context.Context, name string, decoder *yaml.Decoder
 	return actual, nil
 }
 
+type compatibleSource interface {
+	RunSQL(context.Context, string, parameters.ParamValues) (any, error)
+}
+
 type Config struct {
 	Name         string                `yaml:"name" validate:"required"`
-	Kind         string                `yaml:"kind" validate:"required"`
+	Type         string                `yaml:"type" validate:"required"`
 	Source       string                `yaml:"source" validate:"required"`
 	Description  string                `yaml:"description" validate:"required"`
 	AuthRequired []string              `yaml:"authRequired"`
@@ -59,31 +59,20 @@ type Config struct {
 
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return listTablesKind
+func (cfg Config) ToolConfigType() string {
+	return listTablesType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", listTablesKind, compatibleSources)
-	}
-
 	databaseParameter := parameters.NewStringParameter(databaseKey, "The database to list tables from.")
 	params := parameters.Parameters{databaseParameter}
 
 	allParameters, paramManifest, _ := parameters.ProcessParameters(nil, params)
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 
 	t := Tool{
 		Config:      cfg,
 		AllParams:   allParameters,
-		Pool:        s.ClickHousePool(),
 		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
 		mcpManifest: mcpManifest,
 	}
@@ -94,9 +83,7 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-	AllParams parameters.Parameters `yaml:"allParams"`
-
-	Pool        *sql.DB
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
@@ -105,44 +92,46 @@ func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, token tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, token tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
+	}
+
 	mapParams := params.AsMap()
 	database, ok := mapParams[databaseKey].(string)
 	if !ok {
-		return nil, fmt.Errorf("invalid or missing '%s' parameter; expected a string", databaseKey)
+		return nil, util.NewAgentError(fmt.Sprintf("invalid or missing '%s' parameter; expected a string", databaseKey), nil)
 	}
 
 	// Query to list all tables in the specified database
+	// Note: formatting identifier directly is risky if input is untrusted, but standard for this tool structure.
 	query := fmt.Sprintf("SHOW TABLES FROM %s", database)
 
-	results, err := t.Pool.QueryContext(ctx, query)
+	out, err := source.RunSQL(ctx, query, nil)
 	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
+		return nil, util.ProcessGeneralError(err)
 	}
-	defer results.Close()
+
+	res, ok := out.([]any)
+	if !ok {
+		return nil, util.NewClientServerError("unable to convert result to list", http.StatusInternalServerError, nil)
+	}
 
 	var tables []map[string]any
-	for results.Next() {
-		var tableName string
-		err := results.Scan(&tableName)
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
+	for _, item := range res {
+		tableMap, ok := item.(map[string]any)
+		if !ok {
+			return nil, util.NewClientServerError(fmt.Sprintf("unexpected type in result: got %T, want map[string]any", item), http.StatusInternalServerError, nil)
 		}
-		tables = append(tables, map[string]any{
-			"name":     tableName,
-			"database": database,
-		})
+		tableMap["database"] = database
+		tables = append(tables, tableMap)
 	}
-
-	if err := results.Err(); err != nil {
-		return nil, fmt.Errorf("errors encountered by results.Scan: %w", err)
-	}
-
 	return tables, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.AllParams, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.AllParams, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -157,6 +146,14 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.AllParams
 }

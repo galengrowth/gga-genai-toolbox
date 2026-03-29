@@ -15,25 +15,25 @@ package mongodbaggregate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 
 	"github.com/goccy/go-yaml"
-	mongosrc "github.com/googleapis/genai-toolbox/internal/sources/mongodb"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 )
 
-const kind string = "mongodb-aggregate"
+const resourceType string = "mongodb-aggregate"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -45,40 +45,34 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	MongoClient() *mongo.Client
+	Aggregate(context.Context, string, bool, bool, string, string) ([]any, error)
+}
+
 type Config struct {
-	Name            string                `yaml:"name" validate:"required"`
-	Kind            string                `yaml:"kind" validate:"required"`
-	Source          string                `yaml:"source" validate:"required"`
-	AuthRequired    []string              `yaml:"authRequired" validate:"required"`
-	Description     string                `yaml:"description" validate:"required"`
-	Database        string                `yaml:"database" validate:"required"`
-	Collection      string                `yaml:"collection" validate:"required"`
-	PipelinePayload string                `yaml:"pipelinePayload" validate:"required"`
-	PipelineParams  parameters.Parameters `yaml:"pipelineParams" validate:"required"`
-	Canonical       bool                  `yaml:"canonical"`
-	ReadOnly        bool                  `yaml:"readOnly"`
+	Name            string                 `yaml:"name" validate:"required"`
+	Type            string                 `yaml:"type" validate:"required"`
+	Source          string                 `yaml:"source" validate:"required"`
+	AuthRequired    []string               `yaml:"authRequired" validate:"required"`
+	Description     string                 `yaml:"description" validate:"required"`
+	Database        string                 `yaml:"database" validate:"required"`
+	Collection      string                 `yaml:"collection" validate:"required"`
+	PipelinePayload string                 `yaml:"pipelinePayload" validate:"required"`
+	PipelineParams  parameters.Parameters  `yaml:"pipelineParams" validate:"required"`
+	Canonical       bool                   `yaml:"canonical"`
+	ReadOnly        bool                   `yaml:"readOnly"`
+	Annotations     *tools.ToolAnnotations `yaml:"annotations,omitempty"`
 }
 
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(*mongosrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `mongodb`", kind)
-	}
-
 	// Create a slice for all parameters
 	allParameters := slices.Concat(cfg.PipelineParams)
 
@@ -90,13 +84,13 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	}
 
 	// Create MCP manifest
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	annotations := tools.GetAnnotationsOrDefault(cfg.Annotations, tools.NewReadOnlyAnnotations)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, annotations)
 
 	// finish tool setup
 	return Tool{
 		Config:      cfg,
 		AllParams:   allParameters,
-		database:    s.Client.Database(cfg.Database),
 		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
 		mcpManifest: mcpManifest,
 	}, nil
@@ -107,70 +101,31 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-	AllParams parameters.Parameters `yaml:"allParams"`
-
-	database    *mongo.Database
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
-	paramsMap := params.AsMap()
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
+	}
 
+	paramsMap := params.AsMap()
 	pipelineString, err := parameters.PopulateTemplateWithJSON("MongoDBAggregatePipeline", t.PipelinePayload, paramsMap)
 	if err != nil {
-		return nil, fmt.Errorf("error populating pipeline: %s", err)
+		return nil, util.NewAgentError("error populating pipeline", err)
 	}
-
-	var pipeline = []bson.M{}
-	err = bson.UnmarshalExtJSON([]byte(pipelineString), t.Canonical, &pipeline)
+	resp, err := source.Aggregate(ctx, pipelineString, t.Canonical, t.ReadOnly, t.Database, t.Collection)
 	if err != nil {
-		return nil, err
+		return nil, util.ProcessGeneralError(err)
 	}
-
-	if t.ReadOnly {
-		//fail if we do a merge or an out
-		for _, stage := range pipeline {
-			for key := range stage {
-				if key == "$merge" || key == "$out" {
-					return nil, fmt.Errorf("this is not a read-only pipeline: %+v", stage)
-				}
-			}
-		}
-	}
-
-	cur, err := t.database.Collection(t.Collection).Aggregate(ctx, pipeline)
-	if err != nil {
-		return nil, err
-	}
-	defer cur.Close(ctx)
-
-	var data = []any{}
-	err = cur.All(ctx, &data)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(data) == 0 {
-		return []any{}, nil
-	}
-
-	var final []any
-	for _, item := range data {
-		tmp, _ := bson.MarshalExtJSON(item, false, false)
-		var tmp2 any
-		err = json.Unmarshal(tmp, &tmp2)
-		if err != nil {
-			return nil, err
-		}
-		final = append(final, tmp2)
-	}
-
-	return final, err
+	return resp, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.AllParams, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.AllParams, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -185,10 +140,18 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
 }
 
 func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.AllParams
 }

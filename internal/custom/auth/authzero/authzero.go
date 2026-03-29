@@ -18,20 +18,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2" // JWKS caching
-	"github.com/golang-jwt/jwt/v5"     // JWT handling
+	"github.com/MicahParks/keyfunc/v3"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/googleapis/genai-toolbox/internal/auth"
 )
 
-// AuthServiceKind is the canonical kind string for this AuthZero auth service.
-const AuthServiceKind string = "authzero"
+// AuthServiceType is the YAML `type` value for this auth service (v2 config; see `kind` in v1).
+const AuthServiceType string = "authzero"
+
+// AuthServiceKind is a legacy alias for AuthServiceType.
+const AuthServiceKind = AuthServiceType
 
 // validate interface
 var _ auth.AuthServiceConfig = Config{}
@@ -39,15 +42,15 @@ var _ auth.AuthServiceConfig = Config{}
 // Config is the AuthZero (OIDC/JWT) service configuration.
 type Config struct {
 	Name        string   `yaml:"name" validate:"required"`
-	Kind        string   `yaml:"kind" validate:"required"`
+	Type        string   `yaml:"type" validate:"required"`
 	Domain      string   `yaml:"domain" validate:"required,url"`
 	Audience    string   `yaml:"audience" validate:"required,url"`
 	AllowedAlgs []string `yaml:"allowedAlgs" validate:"omitempty"` // default: ["RS256"]
 	Leeway      string   `yaml:"leeway" validate:"omitempty"`      // Go duration; default 30s
 }
 
-// AuthServiceConfigKind returns the kind for config implementations.
-func (cfg Config) AuthServiceConfigKind() string { return AuthServiceKind }
+// AuthServiceConfigType implements auth.AuthServiceConfig.
+func (cfg Config) AuthServiceConfigType() string { return AuthServiceType }
 
 // Initialize builds the AuthZero auth service using JWKS for key discovery.
 func (cfg Config) Initialize() (auth.AuthService, error) {
@@ -72,24 +75,17 @@ func (cfg Config) Initialize() (auth.AuthService, error) {
 		leeway = d
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	options := keyfunc.Options{
-		RefreshInterval:  time.Hour,
-		RefreshRateLimit: 5 * time.Minute,
-		RefreshErrorHandler: func(err error) {
-			logger.Warn("jwks_refresh_failed", "url", jwksURL, "error", err.Error())
-		},
-	}
-	jwks, err := keyfunc.Get(jwksURL, options)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	kf, err := keyfunc.NewDefault([]string{jwksURL})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get JWKS from %s: %w", jwksURL, err)
+		return nil, fmt.Errorf("failed to create JWKS keyfunc from %s: %w", jwksURL, err)
 	}
 	logger.Info("jwks_loaded", "url", jwksURL)
 	return &AuthService{
 		Config:      cfg,
 		Domain:      host,
 		Audience:    cfg.Audience,
-		JWKS:        jwks,
+		kf:          kf,
 		allowedAlgs: allowedAlgs,
 		leeway:      leeway,
 		logger:      logger,
@@ -103,14 +99,14 @@ type AuthService struct {
 	Config
 	Domain      string
 	Audience    string
-	JWKS        *keyfunc.JWKS
+	kf          keyfunc.Keyfunc
 	allowedAlgs []string
 	leeway      time.Duration
 	logger      *slog.Logger
 }
 
-// AuthServiceKind returns the canonical kind string.
-func (a *AuthService) AuthServiceKind() string { return AuthServiceKind }
+// AuthServiceType implements auth.AuthService.
+func (a *AuthService) AuthServiceType() string { return AuthServiceType }
 
 // GetName returns the configured name of this auth service.
 func (a *AuthService) GetName() string { return a.Name }
@@ -149,7 +145,7 @@ func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (m
 	}
 
 	claims := jwt.MapClaims{}
-	parsedToken, err := jwt.ParseWithClaims(tokenStr, claims, a.JWKS.Keyfunc, jwt.WithLeeway(a.leeway))
+	parsedToken, err := jwt.ParseWithClaims(tokenStr, claims, a.kf.Keyfunc, jwt.WithLeeway(a.leeway))
 	if err != nil {
 		a.logger.Debug("jwt_parse_error", "error", err.Error())
 		// Distinguish expiration / nbf errors

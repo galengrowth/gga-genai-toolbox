@@ -17,23 +17,26 @@ package bigquerysearchcatalog
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	dataplexapi "cloud.google.com/go/dataplex/apiv1"
 	dataplexpb "cloud.google.com/go/dataplex/apiv1/dataplexpb"
 	"github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	bigqueryds "github.com/googleapis/genai-toolbox/internal/sources/bigquery"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 	"google.golang.org/api/iterator"
 )
 
-const kind string = "bigquery-search-catalog"
+const resourceType string = "bigquery-search-catalog"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -49,16 +52,12 @@ type compatibleSource interface {
 	MakeDataplexCatalogClient() func() (*dataplexapi.CatalogClient, bigqueryds.DataplexClientCreator, error)
 	BigQueryProject() string
 	UseClientAuthorization() bool
+	GetAuthTokenHeaderName() string
 }
-
-// validate compatible sources are still compatible
-var _ compatibleSource = &bigqueryds.Source{}
-
-var compatibleSources = [...]string{bigqueryds.SourceKind}
 
 type Config struct {
 	Name         string   `yaml:"name" validate:"required"`
-	Kind         string   `yaml:"kind" validate:"required"`
+	Type         string   `yaml:"type" validate:"required"`
 	Source       string   `yaml:"source" validate:"required"`
 	Description  string   `yaml:"description"`
 	AuthRequired []string `yaml:"authRequired"`
@@ -67,25 +66,11 @@ type Config struct {
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// Initialize the search configuration with the provided sources
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	// Get the Dataplex client using the method from the source
-	makeCatalogClient := s.MakeDataplexCatalogClient()
-
 	prompt := parameters.NewStringParameter("prompt", "Prompt representing search intention. Do not rewrite the prompt.")
 	datasetIds := parameters.NewArrayParameterWithDefault("datasetIds", []any{}, "Array of dataset IDs.", parameters.NewStringParameter("datasetId", "The IDs of the bigquery dataset."))
 	projectIds := parameters.NewArrayParameterWithDefault("projectIds", []any{}, "Array of project IDs.", parameters.NewStringParameter("projectId", "The IDs of the bigquery project."))
@@ -97,14 +82,11 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	if cfg.Description != "" {
 		description = cfg.Description
 	}
-	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, params)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, params, nil)
 
 	t := Tool{
-		Config:            cfg,
-		Parameters:        params,
-		UseClientOAuth:    s.UseClientAuthorization(),
-		MakeCatalogClient: makeCatalogClient,
-		ProjectID:         s.BigQueryProject(),
+		Config:     cfg,
+		Parameters: params,
 		manifest: tools.Manifest{
 			Description:  cfg.Description,
 			Parameters:   params.Manifest(),
@@ -117,12 +99,9 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 
 type Tool struct {
 	Config
-	Parameters        parameters.Parameters
-	UseClientOAuth    bool
-	MakeCatalogClient func() (*dataplexapi.CatalogClient, bigqueryds.DataplexClientCreator, error)
-	ProjectID         string
-	manifest          tools.Manifest
-	mcpManifest       tools.McpManifest
+	Parameters  parameters.Parameters
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
 func (t Tool) ToConfig() tools.ToolConfig {
@@ -133,8 +112,12 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.UseClientOAuth
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return false, err
+	}
+	return source.UseClientAuthorization(), nil
 }
 
 func constructSearchQueryHelper(predicate string, operator string, items []string) string {
@@ -206,49 +189,57 @@ func ExtractType(resourceString string) string {
 	return typeMap[resourceString[lastIndex+1:]]
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
+	}
+
 	paramsMap := params.AsMap()
 	pageSize := int32(paramsMap["pageSize"].(int))
 	prompt, _ := paramsMap["prompt"].(string)
+
 	projectIdSlice, err := parameters.ConvertAnySliceToTyped(paramsMap["projectIds"].([]any), "string")
 	if err != nil {
-		return nil, fmt.Errorf("can't convert projectIds to array of strings: %s", err)
+		return nil, util.NewAgentError(fmt.Sprintf("can't convert projectIds to array of strings: %s", err), err)
 	}
 	projectIds := projectIdSlice.([]string)
+
 	datasetIdSlice, err := parameters.ConvertAnySliceToTyped(paramsMap["datasetIds"].([]any), "string")
 	if err != nil {
-		return nil, fmt.Errorf("can't convert datasetIds to array of strings: %s", err)
+		return nil, util.NewAgentError(fmt.Sprintf("can't convert datasetIds to array of strings: %s", err), err)
 	}
 	datasetIds := datasetIdSlice.([]string)
+
 	typesSlice, err := parameters.ConvertAnySliceToTyped(paramsMap["types"].([]any), "string")
 	if err != nil {
-		return nil, fmt.Errorf("can't convert types to array of strings: %s", err)
+		return nil, util.NewAgentError(fmt.Sprintf("can't convert types to array of strings: %s", err), err)
 	}
 	types := typesSlice.([]string)
 
 	req := &dataplexpb.SearchEntriesRequest{
 		Query:          fmt.Sprintf("%s %s", prompt, constructSearchQuery(projectIds, datasetIds, types)),
-		Name:           fmt.Sprintf("projects/%s/locations/global", t.ProjectID),
+		Name:           fmt.Sprintf("projects/%s/locations/global", source.BigQueryProject()),
 		PageSize:       pageSize,
 		SemanticSearch: true,
 	}
 
-	catalogClient, dataplexClientCreator, _ := t.MakeCatalogClient()
+	catalogClient, dataplexClientCreator, _ := source.MakeDataplexCatalogClient()()
 
-	if t.UseClientOAuth {
+	if source.UseClientAuthorization() {
 		tokenStr, err := accessToken.ParseBearerToken()
 		if err != nil {
-			return nil, fmt.Errorf("error parsing access token: %w", err)
+			return nil, util.NewClientServerError("error parsing access token", http.StatusUnauthorized, err)
 		}
 		catalogClient, err = dataplexClientCreator(tokenStr)
 		if err != nil {
-			return nil, fmt.Errorf("error creating client from OAuth access token: %w", err)
+			return nil, util.NewClientServerError("error creating client from OAuth access token", http.StatusInternalServerError, err)
 		}
 	}
 
 	it := catalogClient.SearchEntries(ctx, req)
 	if it == nil {
-		return nil, fmt.Errorf("failed to create search entries iterator for project %q", t.ProjectID)
+		return nil, util.NewClientServerError(fmt.Sprintf("failed to create search entries iterator for project %q", source.BigQueryProject()), http.StatusInternalServerError, nil)
 	}
 
 	var results []Response
@@ -258,7 +249,7 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 			break
 		}
 		if err != nil {
-			break
+			return nil, util.ProcessGcpError(err)
 		}
 		entrySource := entry.DataplexEntry.GetEntrySource()
 		resp := Response{
@@ -273,9 +264,8 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 	return results, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	// Parse parameters from the provided data
-	return parameters.ParseParams(t.Parameters, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.Parameters, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -286,4 +276,16 @@ func (t Tool) Manifest() tools.Manifest {
 func (t Tool) McpManifest() tools.McpManifest {
 	// Returns the tool MCP manifest
 	return t.mcpManifest
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return "", err
+	}
+	return source.GetAuthTokenHeaderName(), nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.Parameters
 }

@@ -16,29 +16,27 @@ package http
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
-
-	"maps"
 	"text/template"
 
 	yaml "github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	httpsrc "github.com/googleapis/genai-toolbox/internal/sources/http"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
-const kind string = "http"
+const resourceType string = "http"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -50,9 +48,16 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	HttpDefaultHeaders() map[string]string
+	HttpBaseURL() string
+	HttpQueryParams() map[string]string
+	RunRequest(context.Context, *http.Request) (any, error)
+}
+
 type Config struct {
 	Name         string                `yaml:"name" validate:"required"`
-	Kind         string                `yaml:"kind" validate:"required"`
+	Type         string                `yaml:"type" validate:"required"`
 	Source       string                `yaml:"source" validate:"required"`
 	Description  string                `yaml:"description" validate:"required"`
 	AuthRequired []string              `yaml:"authRequired"`
@@ -69,8 +74,8 @@ type Config struct {
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
@@ -81,19 +86,19 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	}
 
 	// verify the source is compatible
-	s, ok := rawS.(*httpsrc.Source)
+	s, ok := rawS.(compatibleSource)
 	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `http`", kind)
+		return nil, fmt.Errorf("invalid source for %q tool: source type must be `http`", resourceType)
 	}
 
 	// Combine Source and Tool headers.
 	// In case of conflict, Tool header overrides Source header
 	combinedHeaders := make(map[string]string)
-	maps.Copy(combinedHeaders, s.DefaultHeaders)
+	maps.Copy(combinedHeaders, s.HttpDefaultHeaders())
 	maps.Copy(combinedHeaders, cfg.Headers)
 
 	// Create a slice for all parameters
-	allParameters := slices.Concat(cfg.PathParams, cfg.BodyParams, cfg.HeaderParams, cfg.QueryParams)
+	allParameters := slices.Concat(cfg.PathParams, cfg.QueryParams, cfg.BodyParams, cfg.HeaderParams)
 
 	// Verify no duplicate parameter names
 	err := parameters.CheckDuplicateParameters(allParameters)
@@ -109,18 +114,15 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	}
 
 	// Create MCP manifest
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 
 	// finish tool setup
 	return Tool{
-		Config:             cfg,
-		BaseURL:            s.BaseURL,
-		Headers:            combinedHeaders,
-		DefaultQueryParams: s.QueryParams,
-		Client:             s.Client,
-		AllParams:          allParameters,
-		manifest:           tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
-		mcpManifest:        mcpManifest,
+		Config:      cfg,
+		Headers:     combinedHeaders,
+		AllParams:   allParameters,
+		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
+		mcpManifest: mcpManifest,
 	}, nil
 }
 
@@ -129,12 +131,8 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-	BaseURL            string                `yaml:"baseURL"`
-	Headers            map[string]string     `yaml:"headers"`
-	DefaultQueryParams map[string]string     `yaml:"defaultQueryParams"`
-	AllParams          parameters.Parameters `yaml:"allParams"`
-
-	Client      *http.Client
+	Headers     map[string]string     `yaml:"headers"`
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
@@ -177,12 +175,26 @@ func getURL(baseURL, path string, pathParams, queryParams parameters.Parameters,
 		return "", fmt.Errorf("error replacing pathParams: %s", err)
 	}
 
+	baseParsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("error parsing base URL: %s", err)
+	}
+	if baseParsedURL.Scheme == "" || baseParsedURL.Host == "" {
+		return "", fmt.Errorf("base URL must include scheme and host")
+	}
+
+	relativePath := templatedPath.String()
+	relParsedURL, err := url.Parse(relativePath)
+	if err != nil {
+		return "", fmt.Errorf("error parsing URL path: %s", err)
+	}
+	if relParsedURL.Scheme != "" || relParsedURL.Host != "" || relParsedURL.User != nil {
+		return "", fmt.Errorf("path must be relative and cannot override base host")
+	}
+
 	// Create URL based on BaseURL and Path
 	// Attach query parameters
-	parsedURL, err := url.Parse(baseURL + templatedPath.String())
-	if err != nil {
-		return "", fmt.Errorf("error parsing URL: %s", err)
-	}
+	parsedURL := baseParsedURL.ResolveReference(relParsedURL)
 
 	// Get existing query parameters from the URL
 	queryParameters := parsedURL.Query()
@@ -228,59 +240,50 @@ func getHeaders(headerParams parameters.Parameters, defaultHeaders map[string]st
 	return allHeaders, nil
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
+	}
+
 	paramsMap := params.AsMap()
 
 	// Calculate request body
 	requestBody, err := getRequestBody(t.BodyParams, t.RequestBody, paramsMap)
 	if err != nil {
-		return nil, fmt.Errorf("error populating request body: %s", err)
+		return nil, util.NewAgentError("error populating request body", err)
 	}
 
 	// Calculate URL
-	urlString, err := getURL(t.BaseURL, t.Path, t.PathParams, t.QueryParams, t.DefaultQueryParams, paramsMap)
+	urlString, err := getURL(source.HttpBaseURL(), t.Path, t.PathParams, t.QueryParams, source.HttpQueryParams(), paramsMap)
 	if err != nil {
-		return nil, fmt.Errorf("error populating path parameters: %s", err)
+		return nil, util.NewAgentError("error populating path parameters", err)
 	}
 
-	req, _ := http.NewRequest(string(t.Method), urlString, strings.NewReader(requestBody))
+	req, err := http.NewRequestWithContext(ctx, string(t.Method), urlString, strings.NewReader(requestBody))
+	if err != nil {
+		return nil, util.NewClientServerError("error creating http request", http.StatusInternalServerError, err)
+	}
 
 	// Calculate request headers
 	allHeaders, err := getHeaders(t.HeaderParams, t.Headers, paramsMap)
 	if err != nil {
-		return nil, fmt.Errorf("error populating request headers: %s", err)
+		return nil, util.NewAgentError("error populating request headers", err)
 	}
 	// Set request headers
 	for k, v := range allHeaders {
 		req.Header.Set(k, v)
 	}
 
-	// Make request and fetch response
-	resp, err := t.Client.Do(req)
+	resp, err := source.RunRequest(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("error making HTTP request: %s", err)
+		return nil, util.ProcessGeneralError(err)
 	}
-	defer resp.Body.Close()
-
-	var body []byte
-	body, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("unexpected status code: %d, response body: %s", resp.StatusCode, string(body))
-	}
-
-	var data any
-	if err = json.Unmarshal(body, &data); err != nil {
-		// if unable to unmarshal data, return result as string.
-		return string(body), nil
-	}
-	return data, nil
+	return resp, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.AllParams, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.AllParams, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -295,6 +298,14 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.AllParams
 }

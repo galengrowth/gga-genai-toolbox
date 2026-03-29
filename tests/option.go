@@ -119,6 +119,7 @@ func EnableClientAuthTest() InvokeTestOption {
 // MCPTestConfig represents the various configuration options for mcp tool call tests.
 type MCPTestConfig struct {
 	myToolId3NameAliceWant string
+	mcpSelect1Want         string
 	supportClientAuth      bool
 	supportSelect1Auth     bool
 }
@@ -149,11 +150,20 @@ func DisableMcpSelect1AuthTest() McpTestOption {
 	}
 }
 
+func WithMcpSelect1Want(want string) McpTestOption {
+	return func(c *MCPTestConfig) {
+		c.mcpSelect1Want = want
+	}
+}
+
 /* Configurations for RunExecuteSqlToolInvokeTest()  */
 
 // ExecuteSqlTestConfig represents the various configuration options for RunExecuteSqlToolInvokeTest()
 type ExecuteSqlTestConfig struct {
 	select1Statement string
+	createWant       string
+	dropWant         string
+	selectEmptyWant  string
 }
 
 type ExecuteSqlOption func(*ExecuteSqlTestConfig)
@@ -163,6 +173,27 @@ type ExecuteSqlOption func(*ExecuteSqlTestConfig)
 func WithSelect1Statement(s string) ExecuteSqlOption {
 	return func(c *ExecuteSqlTestConfig) {
 		c.select1Statement = s
+	}
+}
+
+// WithExecuteCreateWant represents the expected response for a CREATE TABLE statement.
+func WithExecuteCreateWant(s string) ExecuteSqlOption {
+	return func(c *ExecuteSqlTestConfig) {
+		c.createWant = s
+	}
+}
+
+// WithExecuteDropWant represents the expected response for a DROP TABLE statement.
+func WithExecuteDropWant(s string) ExecuteSqlOption {
+	return func(c *ExecuteSqlTestConfig) {
+		c.dropWant = s
+	}
+}
+
+// WithExecuteSelectEmptyWant represents the expected response for a SELECT from an empty table.
+func WithExecuteSelectEmptyWant(s string) ExecuteSqlOption {
+	return func(c *ExecuteSqlTestConfig) {
+		c.selectEmptyWant = s
 	}
 }
 

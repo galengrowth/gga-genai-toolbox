@@ -30,14 +30,14 @@ jobs:
 
     steps:
       - name: Checkout main branch (for latest templates and theme)
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: 'main'
           submodules: 'recursive'
           fetch-depth: 0
 
       - name: Checkout old content from tag into a temporary directory
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.event.inputs.version_tag }}
           path: 'old_version_source' # Checkout into a temp subdir
@@ -57,7 +57,7 @@ jobs:
         with:
           hugo-version: "0.145.0"
           extended: true
-      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22"
 
@@ -71,6 +71,11 @@ jobs:
         env:
           HUGO_BASEURL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ github.event.inputs.version_tag }}/
           HUGO_RELATIVEURLS: false
+          HUGO_PARAMS_VERSION: ${{ github.event.inputs.version_tag }}
+
+      - name: Build Pagefind Index (Archived Version)
+        run: npx pagefind --site public
+        working-directory: .hugo
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@4f9cc6602d3f66b9c108549d475ec49e8ef4d45e # v4
@@ -92,6 +97,11 @@ jobs:
         env:
           HUGO_BASEURL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
           HUGO_RELATIVEURLS: false
+          HUGO_PARAMS_VERSION: ${{ github.event.inputs.version_tag }}
+
+      - name: Build Pagefind Index (Root)
+        run: npx pagefind --site public
+        working-directory: .hugo
 
       - name: Deploy to root
         uses: peaceiris/actions-gh-pages@4f9cc6602d3f66b9c108549d475ec49e8ef4d45e # v4

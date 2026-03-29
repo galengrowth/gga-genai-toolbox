@@ -19,16 +19,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/metric"
 )
 
 // apiRouter creates a router that represents the routes under /api
@@ -57,32 +56,15 @@ func toolsetHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 
 	toolsetName := chi.URLParam(r, "toolsetName")
 	s.logger.DebugContext(ctx, fmt.Sprintf("toolset name: %s", toolsetName))
-	span.SetAttributes(attribute.String("toolset_name", toolsetName))
+	span.SetAttributes(attribute.String("toolset.name", toolsetName))
 	var err error
 	defer func() {
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		span.End()
-
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		s.instrumentation.ToolsetGet.Add(
-			r.Context(),
-			1,
-			metric.WithAttributes(attribute.String("toolbox.name", toolsetName)),
-			metric.WithAttributes(attribute.String("toolbox.operation.status", status)),
-		)
 	}()
 
-	// Secure toolset discovery: require valid token and authorization
-	// Note: Discovery is intentionally unauthenticated to maximize compatibility with clients.
-	// If Authorization is present, we still log its presence for debugging.
-	if authz := r.Header.Get("Authorization"); authz != "" {
-		s.logger.DebugContext(ctx, "Authorization header present on discovery request")
-	}
 	toolset, ok := s.ResourceMgr.GetToolset(toolsetName)
 	if !ok {
 		err = fmt.Errorf("toolset %q does not exist", toolsetName)
@@ -107,22 +89,8 @@ func toolGetHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		span.End()
-
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		s.instrumentation.ToolGet.Add(
-			r.Context(),
-			1,
-			metric.WithAttributes(attribute.String("toolbox.name", toolName)),
-			metric.WithAttributes(attribute.String("toolbox.operation.status", status)),
-		)
 	}()
-	// Note: Discovery is intentionally unauthenticated to maximize compatibility with clients.
-	if authz := r.Header.Get("Authorization"); authz != "" {
-		s.logger.DebugContext(ctx, "Authorization header present on tool manifest request")
-	}
+
 	tool, ok := s.ResourceMgr.GetTool(toolName)
 	if !ok {
 		err = fmt.Errorf("invalid tool name: tool with name %q does not exist", toolName)
@@ -156,17 +124,6 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		span.End()
-
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		s.instrumentation.ToolInvoke.Add(
-			r.Context(),
-			1,
-			metric.WithAttributes(attribute.String("toolbox.name", toolName)),
-			metric.WithAttributes(attribute.String("toolbox.operation.status", status)),
-		)
 	}()
 
 	tool, ok := s.ResourceMgr.GetTool(toolName)
@@ -178,16 +135,18 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract OAuth access token from the "Authorization" header (currently for
-	// BigQuery end-user credentials usage only). Also attach the raw header to context
-	// so downstream utilities (e.g., billing) can forward it.
-	authHeader := r.Header.Get("Authorization")
-	accessToken := tools.AccessToken(authHeader)
-	if authHeader != "" {
-		ctx = util.WithAuthorizationHeader(ctx, authHeader)
-	}
+	// BigQuery end-user credentials usage only)
+	accessToken := tools.AccessToken(r.Header.Get("Authorization"))
 
 	// Check if this specific tool requires the standard authorization header
-	if tool.RequiresClientAuthorization() {
+	clientAuth, err := tool.RequiresClientAuthorization(s.ResourceMgr)
+	if err != nil {
+		errMsg := fmt.Errorf("error during invocation: %w", err)
+		s.logger.DebugContext(ctx, errMsg.Error())
+		_ = render.Render(w, r, newErrResponse(errMsg, http.StatusNotFound))
+		return
+	}
+	if clientAuth {
 		if accessToken == "" {
 			err = fmt.Errorf("tool requires client authorization but access token is missing from the request header")
 			s.logger.DebugContext(ctx, err.Error())
@@ -199,12 +158,10 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	// Tool authentication
 	// claimsFromAuth maps the name of the authservice to the claims retrieved from it.
 	claimsFromAuth := make(map[string]map[string]any)
-	authErrors := make(map[string]string)
-	for name, aS := range s.ResourceMgr.GetAuthServiceMap() {
+	for _, aS := range s.ResourceMgr.GetAuthServiceMap() {
 		claims, err := aS.GetClaimsFromHeader(ctx, r.Header)
 		if err != nil {
-			authErrors[name] = err.Error()
-			s.logger.DebugContext(ctx, fmt.Sprintf("auth service %s error: %s", name, err.Error()))
+			s.logger.DebugContext(ctx, err.Error())
 			continue
 		}
 		if claims == nil {
@@ -212,15 +169,6 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		claimsFromAuth[aS.GetName()] = claims
-	}
-
-	// If any claims were verified, attach a merged/basic set into context for billing utilities
-	if len(claimsFromAuth) > 0 {
-		// Prefer the first service's claims; for cross-provider, you can adjust merging as needed
-		for _, c := range claimsFromAuth {
-			ctx = util.WithJWTClaims(ctx, c)
-			break
-		}
 	}
 
 	// Tool authorization check
@@ -234,17 +182,8 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	// Check if any of the specified auth services is verified
 	isAuthorized := tool.Authorized(verifiedAuthServices)
 	if !isAuthorized {
-		// Surface first auth error if any, for easier debugging (e.g., expired token)
-		reason := "missing or invalid credentials"
-		if len(authErrors) > 0 {
-			for svc, msg := range authErrors { // pick first
-				reason = fmt.Sprintf("%s: %s", svc, msg)
-				break
-			}
-		}
-		err = fmt.Errorf("tool invocation not authorized: %s", reason)
+		err = fmt.Errorf("tool invocation not authorized. Please make sure you specify correct auth headers")
 		s.logger.DebugContext(ctx, err.Error())
-		s.setWWWAuthenticateForUnauthorized(w, r)
 		_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
 		return
 	}
@@ -259,79 +198,91 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	params, err := tool.ParseParams(data, claimsFromAuth)
+	params, err := parameters.ParseParams(tool.GetParameters(), data, claimsFromAuth)
 	if err != nil {
-		// If auth error, return 401
-		if errors.Is(err, util.ErrUnauthorized) {
-			s.logger.DebugContext(ctx, fmt.Sprintf("error parsing authenticated parameters from ID token: %s", err))
-			s.setWWWAuthenticateForUnauthorized(w, r)
+		var clientServerErr *util.ClientServerError
+
+		// Return 401 Authentication errors
+		if errors.As(err, &clientServerErr) && clientServerErr.Code == http.StatusUnauthorized {
+			s.logger.DebugContext(ctx, fmt.Sprintf("auth error: %v", err))
 			_ = render.Render(w, r, newErrResponse(err, http.StatusUnauthorized))
 			return
 		}
-		err = fmt.Errorf("provided parameters were invalid: %w", err)
-		s.logger.DebugContext(ctx, err.Error())
-		_ = render.Render(w, r, newErrResponse(err, http.StatusBadRequest))
+
+		var agentErr *util.AgentError
+		if errors.As(err, &agentErr) {
+			s.logger.DebugContext(ctx, fmt.Sprintf("agent validation error: %v", err))
+			errMap := map[string]string{"error": err.Error()}
+			errMarshal, _ := json.Marshal(errMap)
+
+			_ = render.Render(w, r, &resultResponse{Result: string(errMarshal)})
+			return
+		}
+
+		// Return 500 if it's a specific ClientServerError that isn't a 401, or any other unexpected error
+		s.logger.ErrorContext(ctx, fmt.Sprintf("internal server error: %v", err))
+		_ = render.Render(w, r, newErrResponse(err, http.StatusInternalServerError))
 		return
 	}
 	s.logger.DebugContext(ctx, fmt.Sprintf("invocation params: %s", params))
 
-	// Quota preflight: enforce only when endpoint is configured and enforcement enabled
-	if qe := util.QuotaEndpointFromContext(ctx); qe != "" {
-		if enforce, ok := util.QuotaEnforcementFromContext(ctx); ok && enforce {
-			allowed, _, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
-			if qerr != nil {
-				msg := fmt.Errorf("quota preflight failed: %s", qerr)
-				s.logger.ErrorContext(ctx, msg.Error())
-				_ = render.Render(w, r, newErrResponse(msg, http.StatusServiceUnavailable))
-				return
-			}
-			if !allowed {
-				if reason == "" {
-					reason = "row limit exceeded"
-				}
-				err = fmt.Errorf("Insufficient tokens")
-				s.logger.DebugContext(ctx, err.Error())
-				_ = render.Render(w, r, newErrResponse(err, http.StatusTooManyRequests))
-				return
-			}
-		}
-	}
-
-	res, err := tool.Invoke(ctx, params, accessToken)
-
-	// Determine what error to return to the users.
+	params, err = tool.EmbedParams(ctx, params, s.ResourceMgr.GetEmbeddingModelMap())
 	if err != nil {
-		errStr := err.Error()
-		var statusCode int
-
-		// Upstream API auth error propagation
-		switch {
-		case strings.Contains(errStr, "Error 401"):
-			statusCode = http.StatusUnauthorized
-		case strings.Contains(errStr, "Error 403"):
-			statusCode = http.StatusForbidden
-		}
-
-		if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
-			if tool.RequiresClientAuthorization() {
-				// Propagate the original 401/403 error.
-				s.logger.DebugContext(ctx, fmt.Sprintf("error invoking tool. Client credentials lack authorization to the source: %v", err))
-				_ = render.Render(w, r, newErrResponse(err, statusCode))
-				return
-			}
-			// ADC lacking permission or credentials configuration error.
-			internalErr := fmt.Errorf("unexpected auth error occured during Tool invocation: %w", err)
-			s.logger.ErrorContext(ctx, internalErr.Error())
-			_ = render.Render(w, r, newErrResponse(internalErr, http.StatusInternalServerError))
-			return
-		}
-		err = fmt.Errorf("error while invoking tool: %w", err)
+		err = fmt.Errorf("error embedding parameters: %w", err)
 		s.logger.DebugContext(ctx, err.Error())
 		_ = render.Render(w, r, newErrResponse(err, http.StatusBadRequest))
 		return
 	}
 
-	// No synchronous billing enforcement; billing (if enabled) happens asynchronously inside tools via util.LogAndPostBilling
+	res, err := tool.Invoke(ctx, s.ResourceMgr, params, accessToken)
+
+	// Determine what error to return to the users.
+	if err != nil {
+		var tbErr util.ToolboxError
+
+		if errors.As(err, &tbErr) {
+			switch tbErr.Category() {
+			case util.CategoryAgent:
+				// Agent Errors -> 200 OK
+				s.logger.DebugContext(ctx, fmt.Sprintf("Tool invocation agent error: %v", err))
+				res = map[string]string{
+					"error": err.Error(),
+				}
+
+			case util.CategoryServer:
+				// Server Errors -> Check the specific code inside
+				var clientServerErr *util.ClientServerError
+				statusCode := http.StatusInternalServerError // Default to 500
+
+				if errors.As(err, &clientServerErr) {
+					if clientServerErr.Code != 0 {
+						statusCode = clientServerErr.Code
+					}
+				}
+
+				// Process auth error
+				if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+					if clientAuth {
+						// Token error, pass through 401/403
+						s.logger.DebugContext(ctx, fmt.Sprintf("Client credentials lack authorization: %v", err))
+						_ = render.Render(w, r, newErrResponse(err, statusCode))
+						return
+					}
+					// ADC/Config error, return 500
+					statusCode = http.StatusInternalServerError
+				}
+
+				s.logger.ErrorContext(ctx, fmt.Sprintf("Tool invocation server error: %v", err))
+				_ = render.Render(w, r, newErrResponse(err, statusCode))
+				return
+			}
+		} else {
+			// Unknown error -> 500
+			s.logger.ErrorContext(ctx, fmt.Sprintf("Tool invocation unknown error: %v", err))
+			_ = render.Render(w, r, newErrResponse(err, http.StatusInternalServerError))
+			return
+		}
+	}
 
 	resMarshal, err := json.Marshal(res)
 	if err != nil {
