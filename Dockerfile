@@ -11,6 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# BUILDPLATFORM/TARGET* default for `docker build` (e.g. Cloud Build). BuildKit / buildx
+# still override these when set.
+ARG BUILDPLATFORM=linux/amd64
 FROM --platform=$BUILDPLATFORM golang:1 AS build
 
 # Install Zig for CGO cross-compilation
@@ -23,8 +27,8 @@ RUN curl -fL "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
 WORKDIR /go/src/genai-toolbox
 COPY . .
 
-ARG TARGETOS
-ARG TARGETARCH
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 ARG BUILD_TYPE="container.dev"
 ARG COMMIT_SHA=""
 
