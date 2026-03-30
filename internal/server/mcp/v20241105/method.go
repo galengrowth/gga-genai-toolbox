@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
 	"github.com/googleapis/genai-toolbox/internal/prompts"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp/jsonrpc"
 	"github.com/googleapis/genai-toolbox/internal/server/resources"
@@ -204,6 +205,8 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *re
 	}
 	logger.DebugContext(ctx, "tool invocation authorized")
 
+	ctx = customutil.EnrichContextWithAuthForBillingQuota(ctx, header, claimsFromAuth)
+
 	params, err := parameters.ParseParams(tool.GetParameters(), data, claimsFromAuth)
 	if err != nil {
 		err = fmt.Errorf("provided parameters were invalid: %w", err)
@@ -220,6 +223,19 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *re
 
 	// Get instrumentation for recording tool execution duration
 	instrumentation, instrumentationErr := util.InstrumentationFromContext(ctx)
+
+	if qerr := customutil.QuotaPreflightBeforeInvoke(ctx, toolName); qerr != nil {
+		var cse *util.ClientServerError
+		if errors.As(qerr, &cse) {
+			if cse.Code == http.StatusServiceUnavailable {
+				return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, qerr.Error(), nil), qerr
+			}
+			if cse.Code == http.StatusTooManyRequests {
+				return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, qerr.Error(), nil), qerr
+			}
+		}
+		return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, qerr.Error(), nil), qerr
+	}
 
 	// run tool invocation and generate response.
 	executionStart := time.Now()
@@ -286,6 +302,10 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *re
 			return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
 		}
 	}
+
+	rowCount := tools.BillingRowCountFromResult(results)
+	query := tools.BillingQueryFromToolInvocation(tool, params)
+	util.LogAndPostBilling(ctx, toolName, rowCount, query)
 
 	content := make([]TextContent, 0)
 

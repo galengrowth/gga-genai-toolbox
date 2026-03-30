@@ -1,5 +1,7 @@
 // Copyright © 2025, Oracle and/or its affiliates.
 
+//go:build cgo
+
 package oracle
 
 import (
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/godror/godror"
 
 	"github.com/google/uuid"
 	"github.com/googleapis/genai-toolbox/internal/testutils"

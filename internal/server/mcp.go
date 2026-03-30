@@ -31,6 +31,7 @@ import (
 	"github.com/go-chi/render"
 	"github.com/google/uuid"
 	"github.com/googleapis/genai-toolbox/internal/auth/generic"
+	"github.com/googleapis/genai-toolbox/internal/custom/auth/authzero"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp/jsonrpc"
 	mcputil "github.com/googleapis/genai-toolbox/internal/server/mcp/util"
@@ -780,6 +781,18 @@ func prmHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 				server = genCfg.AuthorizationServer
 				if genCfg.ScopesRequired != nil {
 					scopes = genCfg.ScopesRequired
+				}
+				break
+			}
+		}
+	}
+	if server == "" {
+		for _, authSvc := range s.ResourceMgr.GetAuthServiceMap() {
+			cfg := authSvc.ToConfig()
+			if azCfg, ok := cfg.(authzero.Config); ok && azCfg.McpEnabled {
+				server = azCfg.AuthorizationServer
+				if azCfg.ScopesRequired != nil {
+					scopes = azCfg.ScopesRequired
 				}
 				break
 			}

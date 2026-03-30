@@ -28,6 +28,7 @@ import (
 	"github.com/goccy/go-yaml"
 	"github.com/google/go-cmp/cmp"
 	"github.com/googleapis/genai-toolbox/internal/auth/generic"
+	"github.com/googleapis/genai-toolbox/internal/custom/auth/authzero"
 	"github.com/googleapis/genai-toolbox/internal/server"
 )
 
@@ -358,9 +359,15 @@ func mergeConfigs(files ...Config) (Config, error) {
 	// Ensure only one authService has mcpEnabled = true
 	var mcpEnabledAuthServers []string
 	for name, authService := range merged.AuthServices {
-		// Only generic type has McpEnabled right now
-		if genericService, ok := authService.(generic.Config); ok && genericService.McpEnabled {
-			mcpEnabledAuthServers = append(mcpEnabledAuthServers, name)
+		switch a := authService.(type) {
+		case generic.Config:
+			if a.McpEnabled {
+				mcpEnabledAuthServers = append(mcpEnabledAuthServers, name)
+			}
+		case authzero.Config:
+			if a.McpEnabled {
+				mcpEnabledAuthServers = append(mcpEnabledAuthServers, name)
+			}
 		}
 	}
 	if len(mcpEnabledAuthServers) > 1 {

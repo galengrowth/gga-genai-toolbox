@@ -35,6 +35,9 @@ This README provides a brief overview. For comprehensive details, see the [full 
 > [!NOTE]
 > This solution was originally named “Gen AI Toolbox for Databases” (github.com/googleapis/genai-toolbox) as its initial development predated MCP, but was renamed to align with the MCP compatibility.
 
+> [!TIP]
+> **Fork maintainers:** custom billing, quota, OAuth PRM, Auth0 MCP integration, and related YAML keys are documented in **[FORK.md](./FORK.md)** (not part of upstream Google docs).
+
 <!-- TOC ignore:true -->
 ## Table of Contents
 

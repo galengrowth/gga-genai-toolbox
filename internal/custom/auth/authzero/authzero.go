@@ -47,6 +47,12 @@ type Config struct {
 	Audience    string   `yaml:"audience" validate:"required,url"`
 	AllowedAlgs []string `yaml:"allowedAlgs" validate:"omitempty"` // default: ["RS256"]
 	Leeway      string   `yaml:"leeway" validate:"omitempty"`      // Go duration; default 30s
+
+	// McpEnabled, when true, requires a valid Authorization Bearer JWT on every /mcp request (including tools/list).
+	// AuthorizationServer is the OAuth issuer URL used for /.well-known/oauth-protected-resource when MCP auth is enabled.
+	McpEnabled          bool     `yaml:"mcpEnabled"`
+	AuthorizationServer string   `yaml:"authorizationServer" validate:"omitempty,url"`
+	ScopesRequired      []string `yaml:"scopesRequired"`
 }
 
 // AuthServiceConfigType implements auth.AuthServiceConfig.
@@ -73,6 +79,10 @@ func (cfg Config) Initialize() (auth.AuthService, error) {
 			return nil, fmt.Errorf("invalid leeway duration %q: %w", cfg.Leeway, err)
 		}
 		leeway = d
+	}
+
+	if cfg.McpEnabled && strings.TrimSpace(cfg.AuthorizationServer) == "" {
+		return nil, fmt.Errorf("authorizationServer is required when mcpEnabled is true (for OAuth protected resource metadata)")
 	}
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))

@@ -34,6 +34,7 @@ import (
 	"github.com/go-chi/httplog/v3"
 	"github.com/googleapis/genai-toolbox/internal/auth"
 	"github.com/googleapis/genai-toolbox/internal/auth/generic"
+	"github.com/googleapis/genai-toolbox/internal/custom/auth/authzero"
 	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/log"
 	"github.com/googleapis/genai-toolbox/internal/prompts"
@@ -352,6 +353,45 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	r.Use(middleware.RequestID)
 
 	if cfg.Custom != nil {
+		be, hasBE := cfg.Custom["billingEndpoint"].(string)
+		qe, hasQE := cfg.Custom["quotaEndpoint"].(string)
+		var reqBill, hasReqBill bool
+		if v, exists := cfg.Custom["requireBillingPost"]; exists {
+			hasReqBill = true
+			switch x := v.(type) {
+			case bool:
+				reqBill = x
+			case string:
+				reqBill = strings.ToLower(strings.TrimSpace(x)) == "true"
+			case int:
+				reqBill = x != 0
+			}
+		}
+		var reqQuota, hasReqQuota bool
+		if v, exists := cfg.Custom["requireQuotaPreflight"]; exists {
+			hasReqQuota = true
+			switch x := v.(type) {
+			case bool:
+				reqQuota = x
+			case string:
+				reqQuota = strings.ToLower(strings.TrimSpace(x)) == "true"
+			case int:
+				reqQuota = x != 0
+			}
+		}
+		if hasReqQuota && reqQuota && (!hasQE || qe == "") {
+			l.WarnContext(ctx, "quota enforcement requested but quotaEndpoint is not configured; preflight will be skipped")
+		}
+		if hasReqBill && reqBill && (!hasBE || be == "") {
+			l.WarnContext(ctx, "billing enforcement requested but billingEndpoint is not configured; billing POSTs will be skipped")
+		}
+		if hasBE && be != "" {
+			l.InfoContext(ctx, "billing: billingEndpoint set — usage POSTs run after successful tool calls (stricter billing failure logs when requireBillingPost is true)")
+		}
+		if hasQE && qe != "" {
+			l.InfoContext(ctx, "quota: quotaEndpoint set — authorize preflight runs before each tool invocation")
+		}
+
 		debugLogAuthToken := false
 		if v, exists := cfg.Custom["debugLogAuthToken"]; exists {
 			switch x := v.(type) {
@@ -509,6 +549,10 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 			mcpAuthEnabled = true
 			break
 		}
+		if azCfg, ok := authSvc.ToConfig().(authzero.Config); ok && azCfg.McpEnabled {
+			mcpAuthEnabled = true
+			break
+		}
 	}
 
 	// Manual PRM override
@@ -587,24 +631,34 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 func mcpAuthMiddleware(s *Server) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Find McpEnabled auth service
-			var mcpSvc *generic.AuthService
+			// Precedence: generic MCP auth (upstream) first, then fork authzero MCP auth.
+			var validateErr error
+			var mcpAuthConfigured bool
 			for _, authSvc := range s.ResourceMgr.GetAuthServiceMap() {
 				if genSvc, ok := authSvc.(*generic.AuthService); ok && genSvc.McpEnabled {
-					mcpSvc = genSvc
+					mcpAuthConfigured = true
+					validateErr = genSvc.ValidateMCPAuth(r.Context(), r.Header)
 					break
 				}
 			}
+			if !mcpAuthConfigured {
+				for _, authSvc := range s.ResourceMgr.GetAuthServiceMap() {
+					if azSvc, ok := authSvc.(*authzero.AuthService); ok && azSvc.McpEnabled {
+						mcpAuthConfigured = true
+						validateErr = azSvc.ValidateMCPAuth(r.Context(), r.Header)
+						break
+					}
+				}
+			}
 
-			// MCP Auth not enabled
-			if mcpSvc == nil {
+			if !mcpAuthConfigured {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			if err := mcpSvc.ValidateMCPAuth(r.Context(), r.Header); err != nil {
+			if validateErr != nil {
 				var mcpErr *generic.MCPAuthError
-				if errors.As(err, &mcpErr) {
+				if errors.As(validateErr, &mcpErr) {
 					switch mcpErr.Code {
 					case http.StatusUnauthorized:
 						scopesArg := ""

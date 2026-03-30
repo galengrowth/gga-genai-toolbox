@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
+	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
@@ -189,6 +190,8 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.DebugContext(ctx, "tool invocation authorized")
 
+	ctx = customutil.EnrichContextWithAuthForBillingQuota(ctx, r.Header, claimsFromAuth)
+
 	var data map[string]any
 	if err = util.DecodeJSON(r.Body, &data); err != nil {
 		render.Status(r, http.StatusBadRequest)
@@ -231,6 +234,16 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		err = fmt.Errorf("error embedding parameters: %w", err)
 		s.logger.DebugContext(ctx, err.Error())
 		_ = render.Render(w, r, newErrResponse(err, http.StatusBadRequest))
+		return
+	}
+
+	if qerr := customutil.QuotaPreflightBeforeInvoke(ctx, toolName); qerr != nil {
+		var cse *util.ClientServerError
+		if errors.As(qerr, &cse) {
+			_ = render.Render(w, r, newErrResponse(qerr, cse.Code))
+			return
+		}
+		_ = render.Render(w, r, newErrResponse(qerr, http.StatusTooManyRequests))
 		return
 	}
 
@@ -283,6 +296,10 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	rowCount := tools.BillingRowCountFromResult(res)
+	query := tools.BillingQueryFromToolInvocation(tool, params)
+	util.LogAndPostBilling(ctx, toolName, rowCount, query)
 
 	resMarshal, err := json.Marshal(res)
 	if err != nil {

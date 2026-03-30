@@ -60,18 +60,14 @@ func WithBillingEnforcement(ctx context.Context, enforce bool) context.Context {
 var billingHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query string) {
-	// Only perform billing when explicitly enabled via requireBillingPost=true
-	if enforce, ok := BillingEnforcementFromContext(ctx); !ok || !enforce {
-		return
-	}
 	billingURL := BillingEndpointFromContext(ctx)
 	if billingURL == "" {
 		return
 	}
-	// Determine if billing must succeed (default false)
+	// Strict logging / enforced failure hints when requireBillingPost=true; POST is sent whenever billingEndpoint is set.
 	enforceBilling := false
-	if v, ok := ctx.Value(billingEnforceKey).(bool); ok {
-		enforceBilling = v
+	if v, ok := BillingEnforcementFromContext(ctx); ok && v {
+		enforceBilling = true
 	}
 	sub, email := UserInfoFromContext(ctx)
 	reqID := RequestIDFromContext(ctx)
@@ -175,26 +171,26 @@ func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query str
 			return
 		}
 		defer resp.Body.Close()
-		var snippet string
-		if resp.ContentLength != 0 {
-			if b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096)); len(b) > 0 {
-				snippet = string(b)
-			}
-			// drain remaining, if any
-			io.Copy(io.Discard, resp.Body)
-		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16384))
+		_, _ = io.Copy(io.Discard, resp.Body)
+		snippet := string(body)
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			if logger != nil {
-				if snippet != "" {
-					logger.WarnContext(context.Background(), "billing: non-success status", "status", resp.Status, "body", snippet)
-				} else {
-					logger.WarnContext(context.Background(), "billing: non-success status", "status", resp.Status)
-				}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			ClearBillingInsufficientTokensBlock(ctx)
+			return
+		}
+		if logger != nil {
+			if snippet != "" {
+				logger.WarnContext(context.Background(), "billing: non-success status", "status", resp.Status, "body", snippet)
+			} else {
+				logger.WarnContext(context.Background(), "billing: non-success status", "status", resp.Status)
 			}
 			if enforceBilling {
 				logger.ErrorContext(context.Background(), "billing: enforced failure due to non-2xx status", "status", resp.Status)
 			}
+		}
+		if billingResponseIndicatesInsufficientTokens(resp.StatusCode, snippet) {
+			SetBillingInsufficientTokensBlock(ctx)
 		}
 	}(billingURL, reqID, bi)
 }

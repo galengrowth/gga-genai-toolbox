@@ -22,6 +22,8 @@ import (
 
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/goccy/go-yaml"
+	// Fork: SQL guardrails live in internal/custom/util; validating here keeps diffs out of every mysql tool file.
+	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqlcommon"
 	"github.com/googleapis/genai-toolbox/internal/util"
@@ -107,6 +109,9 @@ func (s *Source) MySQLPool() *sql.DB {
 }
 
 func (s *Source) RunSQL(ctx context.Context, statement string, params []any) (any, error) {
+	if err := customutil.ValidateSQLForDatabase(statement, s.DatabaseName()); err != nil {
+		return nil, fmt.Errorf("sql validation: %w", err)
+	}
 	results, err := s.MySQLPool().QueryContext(ctx, statement, params...)
 	if err != nil {
 		return nil, fmt.Errorf("unable to execute query: %w", err)

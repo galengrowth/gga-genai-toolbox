@@ -11,8 +11,7 @@ import (
 	"strings"
 
 	"github.com/goccy/go-yaml"
-	_ "github.com/godror/godror"   // OCI driver
-	_ "github.com/sijms/go-ora/v2" // Pure Go driver
+	_ "github.com/sijms/go-ora/v2" // Pure Go driver (see godror_import.go for OCI / godror)
 
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/util"
