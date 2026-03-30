@@ -28,26 +28,27 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/auth"
 )
 
-// AuthServiceKind is the kind string for the custom HTA auth service.
-// This service delegates token validation to an external HTTP endpoint that
-// returns an allow/deny style response (plus optional claims) via POST.
-const AuthServiceKind string = "hta"
+// AuthServiceType is the YAML `type` value for this auth service.
+const AuthServiceType string = "hta"
+
+// AuthServiceKind is a legacy alias for AuthServiceType.
+const AuthServiceKind = AuthServiceType
 
 // validate interface
 var _ auth.AuthServiceConfig = Config{}
 
-// Auth service configuration for AuthZero (JWT)
+// Config is the HTA auth service configuration.
 type Config struct {
 	Name         string `yaml:"name" validate:"required"`
-	Kind         string `yaml:"kind" validate:"required"`
+	Type         string `yaml:"type" validate:"required"`
 	AuthEndpoint string `yaml:"authEndPoint" validate:"required,url"`
 	// Optional timeout for outbound auth POST (default 5s)
 	Timeout string `yaml:"timeout" validate:"omitempty"`
 }
 
-// Returns the auth service kind
-func (cfg Config) AuthServiceConfigKind() string {
-	return AuthServiceKind
+// AuthServiceConfigType implements auth.AuthServiceConfig.
+func (cfg Config) AuthServiceConfigType() string {
+	return AuthServiceType
 }
 
 // Initialize an AuthZero auth service (JWT over Auth0 domain style)
@@ -78,8 +79,8 @@ type AuthService struct {
 	client       *http.Client
 }
 
-// Returns the auth service kind
-func (a *AuthService) AuthServiceKind() string { return AuthServiceKind }
+// AuthServiceType implements auth.AuthService.
+func (a *AuthService) AuthServiceType() string { return AuthServiceType }
 
 // Returns the name of the auth service
 func (a *AuthService) GetName() string { return a.Name }

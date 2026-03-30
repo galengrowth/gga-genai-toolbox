@@ -16,20 +16,22 @@ package valkey
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	yaml "github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	valkeysrc "github.com/googleapis/genai-toolbox/internal/sources/valkey"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 	"github.com/valkey-io/valkey-go"
 )
 
-const kind string = "valkey"
+const resourceType string = "valkey"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -43,16 +45,12 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	ValkeyClient() valkey.Client
+	RunCommand(context.Context, [][]string) (any, error)
 }
-
-// validate compatible sources are still compatible
-var _ compatibleSource = &valkeysrc.Source{}
-
-var compatibleSources = [...]string{valkeysrc.SourceKind, valkeysrc.SourceKind}
 
 type Config struct {
 	Name         string                `yaml:"name" validate:"required"`
-	Kind         string                `yaml:"kind" validate:"required"`
+	Type         string                `yaml:"type" validate:"required"`
 	Source       string                `yaml:"source" validate:"required"`
 	Description  string                `yaml:"description" validate:"required"`
 	Commands     [][]string            `yaml:"commands" validate:"required"`
@@ -63,29 +61,16 @@ type Config struct {
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, cfg.Parameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, cfg.Parameters, nil)
 
 	// finish tool setup
 	t := Tool{
 		Config:      cfg,
-		Client:      s.ValkeyClient(),
 		manifest:    tools.Manifest{Description: cfg.Description, Parameters: cfg.Parameters.Manifest(), AuthRequired: cfg.AuthRequired},
 		mcpManifest: mcpManifest,
 	}
@@ -97,50 +82,26 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-
-	Client      valkey.Client
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source not compatible with this tool", http.StatusInternalServerError, nil)
+	}
+
 	// Replace parameters
 	commands, err := replaceCommandsParams(t.Commands, t.Parameters, params)
 	if err != nil {
-		return nil, fmt.Errorf("error replacing commands' parameters: %s", err)
+		return nil, util.NewAgentError("error replacing commands' parameters", err)
 	}
-
-	// Build commands
-	builtCmds := make(valkey.Commands, len(commands))
-
-	for i, cmd := range commands {
-		builtCmds[i] = t.Client.B().Arbitrary(cmd...).Build()
+	res, err := source.RunCommand(ctx, commands)
+	if err != nil {
+		return nil, util.ProcessGeneralError(err)
 	}
-
-	if len(builtCmds) == 0 {
-		return nil, fmt.Errorf("no valid commands were built to execute")
-	}
-
-	// Execute commands
-	responses := t.Client.DoMulti(ctx, builtCmds...)
-
-	// Parse responses
-	out := make([]any, len(t.Commands))
-	for i, resp := range responses {
-		if err := resp.Error(); err != nil {
-			// Add error from each command to `errSum`
-			out[i] = fmt.Sprintf("error from executing command at index %d: %s", i, err)
-			continue
-		}
-		val, err := resp.ToAny()
-		if err != nil {
-			out[i] = fmt.Sprintf("error parsing response: %s", err)
-			continue
-		}
-		out[i] = val
-	}
-
-	return out, nil
+	return res, nil
 }
 
 // replaceCommandsParams is a helper function to replace parameters in the commands
@@ -177,8 +138,8 @@ func replaceCommandsParams(commands [][]string, params parameters.Parameters, pa
 	return newCommands, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.Parameters, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.Parameters, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -193,10 +154,18 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
 }
 
 func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.Parameters
 }

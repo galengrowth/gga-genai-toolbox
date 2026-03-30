@@ -2,48 +2,87 @@
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 package util
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
-// ValidateSQLForDatabase checks if the SQL query attempts to access databases other than the configured one.
+var (
+	reBlockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	// Word-boundary USE (avoids matching "misUSE" in identifiers).
+	reUseStatement = regexp.MustCompile(`(?i)\bUSE\s+`)
+	// MySQL explicit cross-database form: `db`.`table` — first identifier is the database name.
+	// Unquoted db.table is not validated (would false-positive alias.column, e.g. u.name).
+	reBacktickQualified = regexp.MustCompile("`([^`]+)`\\s*\\.\\s*`([^`]+)`")
+)
+
+// ValidateSQLForDatabase checks that SQL does not switch databases or reference other
+// databases by name than the configured source database.
+//
+// It is a heuristic (not a full SQL parser): it strips block comments, rejects USE,
+// and flags obvious `other_db`.`tbl` / other_db.tbl patterns when they differ from
+// the configured database name (case-insensitive). If database is empty, only USE
+// is rejected; cross-database qualification is skipped.
 func ValidateSQLForDatabase(sql, database string) error {
-	// Reject USE statements
-	if strings.Contains(strings.ToUpper(sql), "USE ") {
-		return fmt.Errorf("USE statements are not allowed")
+	sql = strings.TrimSpace(sql)
+	database = strings.TrimSpace(database)
+	if sql == "" {
+		return nil
 	}
-	// Simple check for db.table references where db != configured database
-	// This is basic; a full parser would be better, but this covers common cases
-	parts := strings.Split(sql, "`")
-	for i := 0; i < len(parts)-1; i += 2 { // even indices are outside backticks
-		segment := parts[i]
-		// Look for db.table patterns
-		if strings.Contains(segment, ".") {
-			words := strings.FieldsFunc(segment, func(r rune) bool {
-				return r == '.' || r == ' ' || r == '\t' || r == '\n' || r == '(' || r == ')'
-			})
-			for j, word := range words {
-				if word == "." && j > 0 && j < len(words)-1 {
-					db := words[j-1]
-					if db != database && db != "" {
-						return fmt.Errorf("access to database %q is not allowed; only %q is permitted", db, database)
-					}
-				}
-			}
-		}
+
+	sql = reBlockComment.ReplaceAllString(sql, "")
+	if err := rejectUseStatement(sql); err != nil {
+		return err
+	}
+	if database == "" {
+		return nil
+	}
+	return rejectForeignDatabaseQualifiers(sql, database)
+}
+
+func rejectUseStatement(sql string) error {
+	if reUseStatement.MatchString(sql) {
+		return fmt.Errorf("USE statements are not allowed; only the configured database may be used")
 	}
 	return nil
+}
+
+func rejectForeignDatabaseQualifiers(sql, allowedDB string) error {
+	allowedDB = strings.TrimSpace(allowedDB)
+	if allowedDB == "" {
+		return nil
+	}
+
+	for _, m := range reBacktickQualified.FindAllStringSubmatch(sql, -1) {
+		if len(m) < 3 {
+			continue
+		}
+		db := strings.TrimSpace(m[1])
+		if db == "" {
+			continue
+		}
+		if strings.EqualFold(db, allowedDB) {
+			continue
+		}
+		if isAllowedSystemSchema(db) {
+			continue
+		}
+		return fmt.Errorf("access to database %q is not allowed; only %q is permitted", db, allowedDB)
+	}
+
+	return nil
+}
+
+// Allow read-only introspection schemas commonly used in metadata queries.
+func isAllowedSystemSchema(name string) bool {
+	switch strings.ToLower(name) {
+	case "information_schema", "performance_schema", "mysql", "sys":
+		return true
+	default:
+		return false
+	}
 }

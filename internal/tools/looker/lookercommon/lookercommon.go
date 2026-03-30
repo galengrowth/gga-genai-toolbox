@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,63 +15,16 @@ package lookercommon
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 
-	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
-	rtl "github.com/looker-open-source/sdk-codegen/go/rtl"
+	"github.com/looker-open-source/sdk-codegen/go/rtl"
 	v4 "github.com/looker-open-source/sdk-codegen/go/sdk/v4"
 	"github.com/thlib/go-timezone-local/tzlocal"
 )
-
-// Make types for RoundTripper
-type transportWithAuthHeader struct {
-	Base      http.RoundTripper
-	AuthToken tools.AccessToken
-}
-
-func (t *transportWithAuthHeader) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set("x-looker-appid", "go-sdk")
-	req.Header.Set("Authorization", string(t.AuthToken))
-	return t.Base.RoundTrip(req)
-}
-
-func GetLookerSDK(useClientOAuth bool, config *rtl.ApiSettings, client *v4.LookerSDK, accessToken tools.AccessToken) (*v4.LookerSDK, error) {
-
-	if useClientOAuth {
-		if accessToken == "" {
-			return nil, fmt.Errorf("no access token supplied with request")
-		}
-		// Configure base transport with TLS
-		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: !config.VerifySsl,
-			},
-		}
-
-		// Build transport for end user token
-		newTransport := &transportWithAuthHeader{
-			Base:      transport,
-			AuthToken: accessToken,
-		}
-
-		// return SDK with new Transport
-		return v4.NewLookerSDK(&rtl.AuthSession{
-			Config: *config,
-			Client: http.Client{Transport: newTransport},
-		}), nil
-	}
-
-	if client == nil {
-		return nil, fmt.Errorf("client id or client secret not valid")
-	}
-	return client, nil
-}
 
 const (
 	DimensionsFields = "fields(dimensions(name,type,label,label_short,description,synonyms,tags,hidden,suggestable,suggestions,suggest_dimension,suggest_explore))"
@@ -346,5 +299,76 @@ func CreateProjectFile(l *v4.LookerSDK, projectId string, fileContent FileConten
 func UpdateProjectFile(l *v4.LookerSDK, projectId string, fileContent FileContent, options *rtl.ApiSettings) error {
 	path := fmt.Sprintf("/projects/%s/files", url.PathEscape(projectId))
 	err := l.AuthSession.Do(nil, "PUT", "/4.0", path, nil, fileContent, options)
+	return err
+}
+
+func GetProjectDirectories(l *v4.LookerSDK, projectId string, options *rtl.ApiSettings) (string, error) {
+	var result string
+	path := fmt.Sprintf("/projects/%s/directories", url.PathEscape(projectId))
+	err := l.AuthSession.Do(&result, "GET", "/4.0", path, nil, nil, options)
+	return result, err
+}
+
+type Directory struct {
+	Path string `json:"path"`
+}
+
+func CreateProjectDirectory(l *v4.LookerSDK, projectId string, directoryPath string, options *rtl.ApiSettings) error {
+	d := Directory{
+		Path: directoryPath,
+	}
+	var result string
+	path := fmt.Sprintf("/projects/%s/directories", url.PathEscape(projectId))
+	return l.AuthSession.Do(&result, "POST", "/4.0", path, nil, d, options)
+}
+
+func DeleteProjectDirectory(l *v4.LookerSDK, projectId string, directoryPath string, options *rtl.ApiSettings) error {
+	var query = map[string]any{
+		"path": directoryPath,
+	}
+	var result string
+	path := fmt.Sprintf("/projects/%s/directories", url.PathEscape(projectId))
+	return l.AuthSession.Do(&result, "DELETE", "/4.0", path, query, nil, options)
+}
+
+type ProjectGeneratorColumn struct {
+	ColumnName string `json:"column_name"`
+}
+
+type ProjectGeneratorTable struct {
+	Schema     string                   `json:"schema"`
+	TableName  string                   `json:"table_name"`
+	PrimaryKey *string                  `json:"primary_key,omitempty"`
+	BaseView   *bool                    `json:"base_view,omitempty"`
+	Columns    []ProjectGeneratorColumn `json:"columns,omitempty"`
+}
+
+type ProjectGeneratorRequestBody struct {
+	Tables []ProjectGeneratorTable `json:"tables"`
+}
+
+type ProjectGeneratorQueryParams struct {
+	Connection          string `json:"connection"`
+	FileTypeForExplores string `json:"file_type_for_explores"`
+	FolderName          string `json:"folder_name,omitempty"`
+}
+
+func CreateViewsFromTables(ctx context.Context, l *v4.LookerSDK, projectId string, queryParams ProjectGeneratorQueryParams, reqBody ProjectGeneratorRequestBody, options *rtl.ApiSettings) error {
+	path := fmt.Sprintf("/projects/%s/generate", url.PathEscape(projectId))
+
+	// Construct query parameter map
+	query := map[string]any{
+		"connection":             queryParams.Connection,
+		"file_type_for_explores": queryParams.FileTypeForExplores,
+		"folder_name":            queryParams.FolderName,
+	}
+
+	// Pass the Tables slice directly as the body, not the wrapped struct.
+	// The API spec defines `tables` as `body_param ... array: true`,
+	// which means the body itself should be the array.
+	err := l.AuthSession.Do(nil, "POST", "/4.0", path, query, reqBody.Tables, options)
+
+	logger, _ := util.LoggerFromContext(ctx)
+	logger.DebugContext(ctx, fmt.Sprintf("generating views with request: query=%v body=%v error=%v", query, reqBody.Tables, err))
 	return err
 }

@@ -49,12 +49,10 @@ func TestTool_Invoke(t *testing.T) {
 	tool := cloudmonitoring.Tool{
 		Config: cloudmonitoring.Config{
 			Name:        "test-cloudmonitoring",
-			Kind:        "cloud-monitoring-query-prometheus",
+			Type:        "cloud-monitoring-query-prometheus",
 			Description: "Test Cloudmonitoring Tool",
 		},
 		AllParams: parameters.Parameters{},
-		BaseURL:   server.URL,
-		Client:    &http.Client{},
 	}
 
 	// Define the test parameters
@@ -64,7 +62,7 @@ func TestTool_Invoke(t *testing.T) {
 	}
 
 	// Invoke the tool
-	result, err := tool.Invoke(context.Background(), params, "")
+	result, err := tool.Invoke(context.Background(), nil, params, "")
 	if err != nil {
 		t.Fatalf("Invoke() error = %v", err)
 	}
@@ -95,12 +93,10 @@ func TestTool_Invoke_Error(t *testing.T) {
 	tool := cloudmonitoring.Tool{
 		Config: cloudmonitoring.Config{
 			Name:        "test-cloudmonitoring",
-			Kind:        "clou-monitoring-query-prometheus",
+			Type:        "clou-monitoring-query-prometheus",
 			Description: "Test Cloudmonitoring Tool",
 		},
 		AllParams: parameters.Parameters{},
-		BaseURL:   server.URL,
-		Client:    &http.Client{},
 	}
 
 	// Define the test parameters
@@ -110,7 +106,7 @@ func TestTool_Invoke_Error(t *testing.T) {
 	}
 
 	// Invoke the tool
-	_, err := tool.Invoke(context.Background(), params, "")
+	_, err := tool.Invoke(context.Background(), nil, params, "")
 	if err == nil {
 		t.Fatal("Invoke() error = nil, want error")
 	}

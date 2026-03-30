@@ -17,19 +17,21 @@ package cloudsqllistdatabases
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	cloudsqladminsrc "github.com/googleapis/genai-toolbox/internal/sources/cloudsqladmin"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
-const kind string = "cloud-sql-list-databases"
+const resourceType string = "cloud-sql-list-databases"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -41,10 +43,16 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	GetDefaultProject() string
+	UseClientAuthorization() bool
+	ListDatabase(context.Context, string, string, string) (any, error)
+}
+
 // Config defines the configuration for the list-databases tool.
 type Config struct {
 	Name         string   `yaml:"name" validate:"required"`
-	Kind         string   `yaml:"kind" validate:"required"`
+	Type         string   `yaml:"type" validate:"required"`
 	Source       string   `yaml:"source" validate:"required"`
 	Description  string   `yaml:"description"`
 	AuthRequired []string `yaml:"authRequired"`
@@ -53,9 +61,9 @@ type Config struct {
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-// ToolConfigKind returns the kind of the tool.
-func (cfg Config) ToolConfigKind() string {
-	return kind
+// ToolConfigType returns the type of the tool.
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 // Initialize initializes the tool from the configuration.
@@ -64,12 +72,12 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	if !ok {
 		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
 	}
-	s, ok := rawS.(*cloudsqladminsrc.Source)
+	s, ok := rawS.(compatibleSource)
 	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `cloud-sql-admin`", kind)
+		return nil, fmt.Errorf("invalid source for %q tool: source type must be `cloud-sql-admin`", resourceType)
 	}
 
-	project := s.DefaultProject
+	project := s.GetDefaultProject()
 	var projectParam parameters.Parameter
 	if project != "" {
 		projectParam = parameters.NewStringParameterWithDefault("project", project, "The GCP project ID. This is pre-configured; do not ask for it unless the user explicitly provides a different one.")
@@ -87,11 +95,10 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	if description == "" {
 		description = "Lists all databases for a Cloud SQL instance."
 	}
-	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, description, cfg.AuthRequired, allParameters, nil)
 
 	return Tool{
 		Config:      cfg,
-		Source:      s,
 		AllParams:   allParameters,
 		manifest:    tools.Manifest{Description: description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
 		mcpManifest: mcpManifest,
@@ -102,7 +109,6 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 type Tool struct {
 	Config
 	AllParams   parameters.Parameters `yaml:"allParams"`
-	Source      *cloudsqladminsrc.Source
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
@@ -112,53 +118,31 @@ func (t Tool) ToConfig() tools.ToolConfig {
 }
 
 // Invoke executes the tool's logic.
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
+	}
+
 	paramsMap := params.AsMap()
 
 	project, ok := paramsMap["project"].(string)
 	if !ok {
-		return nil, fmt.Errorf("missing 'project' parameter")
+		return nil, util.NewAgentError("missing 'project' parameter", nil)
 	}
 	instance, ok := paramsMap["instance"].(string)
 	if !ok {
-		return nil, fmt.Errorf("missing 'instance' parameter")
+		return nil, util.NewAgentError("missing 'instance' parameter", nil)
 	}
-
-	service, err := t.Source.GetService(ctx, string(accessToken))
+	resp, err := source.ListDatabase(ctx, project, instance, string(accessToken))
 	if err != nil {
-		return nil, err
+		return nil, util.ProcessGcpError(err)
 	}
-
-	resp, err := service.Databases.List(project, instance).Do()
-	if err != nil {
-		return nil, fmt.Errorf("error listing databases: %w", err)
-	}
-
-	if resp.Items == nil {
-		return []any{}, nil
-	}
-
-	type databaseInfo struct {
-		Name      string `json:"name"`
-		Charset   string `json:"charset"`
-		Collation string `json:"collation"`
-	}
-
-	var databases []databaseInfo
-	for _, item := range resp.Items {
-		databases = append(databases, databaseInfo{
-			Name:      item.Name,
-			Charset:   item.Charset,
-			Collation: item.Collation,
-		})
-	}
-
-	return databases, nil
+	return resp, nil
 }
 
-// ParseParams parses the parameters for the tool.
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.AllParams, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.AllParams, paramValues, embeddingModelsMap, nil)
 }
 
 // Manifest returns the tool's manifest.
@@ -176,6 +160,18 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return true
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.Source.UseClientAuthorization()
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return false, err
+	}
+	return source.UseClientAuthorization(), nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.AllParams
 }

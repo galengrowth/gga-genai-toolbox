@@ -15,26 +15,25 @@ package mongodbinsertmany
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	mongosrc "github.com/googleapis/genai-toolbox/internal/sources/mongodb"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-const kind string = "mongodb-insert-many"
+const resourceType string = "mongodb-insert-many"
 
 const paramDataKey = "data"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -46,37 +45,31 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	MongoClient() *mongo.Client
+	InsertMany(context.Context, string, bool, string, string) ([]any, error)
+}
+
 type Config struct {
-	Name         string   `yaml:"name" validate:"required"`
-	Kind         string   `yaml:"kind" validate:"required"`
-	Source       string   `yaml:"source" validate:"required"`
-	AuthRequired []string `yaml:"authRequired" validate:"required"`
-	Description  string   `yaml:"description" validate:"required"`
-	Database     string   `yaml:"database" validate:"required"`
-	Collection   string   `yaml:"collection" validate:"required"`
-	Canonical    bool     `yaml:"canonical" validate:"required"` //i want to force the user to choose
+	Name         string                 `yaml:"name" validate:"required"`
+	Type         string                 `yaml:"type" validate:"required"`
+	Source       string                 `yaml:"source" validate:"required"`
+	AuthRequired []string               `yaml:"authRequired" validate:"required"`
+	Description  string                 `yaml:"description" validate:"required"`
+	Database     string                 `yaml:"database" validate:"required"`
+	Collection   string                 `yaml:"collection" validate:"required"`
+	Canonical    bool                   `yaml:"canonical"`
+	Annotations  *tools.ToolAnnotations `yaml:"annotations,omitempty"`
 }
 
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(*mongosrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `mongodb`", kind)
-	}
-
 	dataParam := parameters.NewStringParameterWithRequired(paramDataKey, "the JSON payload to insert, should be a JSON array of documents", true)
 
 	allParameters := parameters.Parameters{dataParam}
@@ -89,12 +82,12 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 	}
 
 	// Create MCP manifest
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	annotations := tools.GetAnnotationsOrDefault(cfg.Annotations, tools.NewDestructiveAnnotations)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, annotations)
 	// finish tool setup
 	return Tool{
 		Config:        cfg,
 		PayloadParams: allParameters,
-		database:      s.Client.Database(cfg.Database),
 		manifest:      tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
 		mcpManifest:   mcpManifest,
 	}, nil
@@ -106,40 +99,35 @@ var _ tools.Tool = Tool{}
 type Tool struct {
 	Config
 	PayloadParams parameters.Parameters
-
-	database    *mongo.Database
-	manifest    tools.Manifest
-	mcpManifest tools.McpManifest
+	manifest      tools.Manifest
+	mcpManifest   tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
+	}
+
 	if len(params) == 0 {
-		return nil, errors.New("no input found")
+		return nil, util.NewAgentError("no input found", nil)
 	}
 
 	paramsMap := params.AsMap()
 
-	var jsonData, ok = paramsMap[paramDataKey].(string)
+	jsonData, ok := paramsMap[paramDataKey].(string)
 	if !ok {
-		return nil, errors.New("no input found")
+		return nil, util.NewAgentError("no input found or invalid type for data", nil)
 	}
-
-	var data = []any{}
-	err := bson.UnmarshalExtJSON([]byte(jsonData), t.Canonical, &data)
+	resp, err := source.InsertMany(ctx, jsonData, t.Canonical, t.Database, t.Collection)
 	if err != nil {
-		return nil, err
+		return nil, util.ProcessGeneralError(err)
 	}
-
-	res, err := t.database.Collection(t.Collection).InsertMany(ctx, data, options.InsertMany())
-	if err != nil {
-		return nil, err
-	}
-
-	return res.InsertedIDs, nil
+	return resp, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.PayloadParams, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.PayloadParams, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -154,10 +142,18 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
 }
 
 func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.PayloadParams
 }

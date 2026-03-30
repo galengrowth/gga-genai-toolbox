@@ -3,8 +3,10 @@ package util
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +21,10 @@ func (noopLogger) DebugContext(ctx context.Context, format string, args ...inter
 func (noopLogger) InfoContext(ctx context.Context, format string, args ...interface{})  {}
 func (noopLogger) WarnContext(ctx context.Context, format string, args ...interface{})  {}
 func (noopLogger) ErrorContext(ctx context.Context, format string, args ...interface{}) {}
+
+func (noopLogger) SlogLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 var _ ilog.Logger = (*noopLogger)(nil)
 
@@ -117,6 +123,33 @@ func TestLogAndPostBilling_NoEndpoint_NoPanic(t *testing.T) {
 	// no endpoint set
 	LogAndPostBilling(ctx, "tool", 1, "q")
 	// If we reach here without panic or hang, it's fine
+}
+
+func TestLogAndPostBilling_SendsWithEndpointWithoutRequireBillingPost(t *testing.T) {
+	var received int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&received, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	ctx = WithBillingEndpoint(ctx, ts.URL)
+	ctx = WithLogger(ctx, noopLogger{})
+	// Intentionally no WithBillingEnforcement — billingEndpoint alone should trigger POST
+
+	LogAndPostBilling(ctx, "tool", 1, "select 1")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&received) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&received) == 0 {
+		t.Fatalf("billing request not received when only billingEndpoint is set")
+	}
 }
 
 func TestLogAndPostBilling_ForwardsAuthorization(t *testing.T) {

@@ -17,12 +17,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 
 	yaml "github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	lookersrc "github.com/googleapis/genai-toolbox/internal/sources/looker"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/looker/lookercommon"
 	"github.com/googleapis/genai-toolbox/internal/util"
@@ -34,11 +35,11 @@ import (
 // =================================================================================================================
 // START MCP SERVER CORE LOGIC
 // =================================================================================================================
-const kind string = "looker-health-analyze"
+const resourceType string = "looker-health-analyze"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -50,32 +51,30 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	UseClientAuthorization() bool
+	GetAuthTokenHeaderName() string
+	LookerApiSettings() *rtl.ApiSettings
+	GetLookerSDK(string) (*v4.LookerSDK, error)
+}
+
 type Config struct {
-	Name         string         `yaml:"name" validate:"required"`
-	Kind         string         `yaml:"kind" validate:"required"`
-	Source       string         `yaml:"source" validate:"required"`
-	Description  string         `yaml:"description" validate:"required"`
-	AuthRequired []string       `yaml:"authRequired"`
-	Parameters   map[string]any `yaml:"parameters"`
+	Name         string                 `yaml:"name" validate:"required"`
+	Type         string                 `yaml:"type" validate:"required"`
+	Source       string                 `yaml:"source" validate:"required"`
+	Description  string                 `yaml:"description" validate:"required"`
+	AuthRequired []string               `yaml:"authRequired"`
+	Parameters   map[string]any         `yaml:"parameters"`
+	Annotations  *tools.ToolAnnotations `yaml:"annotations,omitempty"`
 }
 
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	s, ok := rawS.(*lookersrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `looker`", kind)
-	}
-
 	actionParameter := parameters.NewStringParameterWithRequired("action", "The analysis to run. Can be 'projects', 'models', or 'explores'.", true)
 	projectParameter := parameters.NewStringParameterWithRequired("project", "The Looker project to analyze (optional).", false)
 	modelParameter := parameters.NewStringParameterWithRequired("model", "The Looker model to analyze (optional).", false)
@@ -92,14 +91,19 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		minQueriesParameter,
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params)
+	annotations := cfg.Annotations
+	if annotations == nil {
+		readOnlyHint := true
+		annotations = &tools.ToolAnnotations{
+			ReadOnlyHint: &readOnlyHint,
+		}
+	}
+
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, annotations)
 
 	return Tool{
-		Config:         cfg,
-		Parameters:     params,
-		UseClientOAuth: s.UseClientOAuth,
-		Client:         s.Client,
-		ApiSettings:    s.ApiSettings,
+		Config:     cfg,
+		Parameters: params,
 		manifest: tools.Manifest{
 			Description:  cfg.Description,
 			Parameters:   params.Manifest(),
@@ -113,27 +117,29 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-	UseClientOAuth bool
-	Client         *v4.LookerSDK
-	ApiSettings    *rtl.ApiSettings
-	Parameters     parameters.Parameters
-	manifest       tools.Manifest
-	mcpManifest    tools.McpManifest
+	Parameters  parameters.Parameters
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
 func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
-	logger, err := util.LoggerFromContext(ctx)
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
 	if err != nil {
-		return nil, fmt.Errorf("unable to get logger from ctx: %s", err)
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
 	}
 
-	sdk, err := lookercommon.GetLookerSDK(t.UseClientOAuth, t.ApiSettings, t.Client, accessToken)
+	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error getting sdk: %w", err)
+		return nil, util.NewClientServerError("unable to get logger from ctx", http.StatusInternalServerError, err)
+	}
+
+	sdk, err := source.GetLookerSDK(string(accessToken))
+	if err != nil {
+		return nil, util.NewClientServerError(fmt.Sprintf("error getting sdk: %v", err), http.StatusInternalServerError, err)
 	}
 
 	paramsMap := params.AsMap()
@@ -154,7 +160,7 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 
 	action, ok := paramsMap["action"].(string)
 	if !ok {
-		return nil, fmt.Errorf("action parameter not found")
+		return nil, util.NewAgentError("action parameter not found", nil)
 	}
 
 	switch action {
@@ -162,7 +168,7 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 		projectId, _ := paramsMap["project"].(string)
 		result, err := analyzeTool.projects(ctx, projectId)
 		if err != nil {
-			return nil, fmt.Errorf("error analyzing projects: %w", err)
+			return nil, util.NewClientServerError(fmt.Sprintf("error analyzing projects: %v", err), http.StatusInternalServerError, err)
 		}
 		logger.DebugContext(ctx, "result = ", result)
 		return result, nil
@@ -171,7 +177,7 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 		modelName, _ := paramsMap["model"].(string)
 		result, err := analyzeTool.models(ctx, projectName, modelName)
 		if err != nil {
-			return nil, fmt.Errorf("error analyzing models: %w", err)
+			return nil, util.NewClientServerError(fmt.Sprintf("error analyzing models: %v", err), http.StatusInternalServerError, err)
 		}
 		logger.DebugContext(ctx, "result = ", result)
 		return result, nil
@@ -180,16 +186,17 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 		exploreName, _ := paramsMap["explore"].(string)
 		result, err := analyzeTool.explores(ctx, modelName, exploreName)
 		if err != nil {
-			return nil, fmt.Errorf("error analyzing explores: %w", err)
+			return nil, util.NewClientServerError(fmt.Sprintf("error analyzing explores: %v", err), http.StatusInternalServerError, err)
 		}
 		logger.DebugContext(ctx, "result = ", result)
 		return result, nil
 	default:
-		return nil, fmt.Errorf("unknown action: %s", action)
+		return nil, util.NewAgentError(fmt.Sprintf("unknown action: %s", action), nil)
 	}
 }
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.Parameters, data, claims)
+
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.Parameters, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -200,12 +207,16 @@ func (t Tool) McpManifest() tools.McpManifest {
 	return t.mcpManifest
 }
 
-func (t Tool) Authorized(verifiedAuthServices []string) bool {
-	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return false, err
+	}
+	return source.UseClientAuthorization(), nil
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.UseClientOAuth
+func (t Tool) Authorized(verifiedAuthServices []string) bool {
+	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
 // =================================================================================================================
@@ -221,23 +232,23 @@ type analyzeTool struct {
 	minQueries int
 }
 
-func (t *analyzeTool) projects(ctx context.Context, id string) ([]map[string]interface{}, error) {
+func (t *analyzeTool) projects(ctx context.Context, id string) ([]map[string]interface{}, util.ToolboxError) {
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unable to get logger from ctx: %s", err)
+		return nil, util.NewClientServerError("unable to get logger from ctx", http.StatusInternalServerError, err)
 	}
 
 	var projects []*v4.Project
 	if id != "" {
 		p, err := t.SdkClient.Project(id, "", nil)
 		if err != nil {
-			return nil, fmt.Errorf("error fetching project %s: %w", id, err)
+			return nil, util.NewClientServerError(fmt.Sprintf("error fetching project %s: %v", id, err), http.StatusInternalServerError, err)
 		}
 		projects = append(projects, &p)
 	} else {
 		allProjects, err := t.SdkClient.AllProjects("", nil)
 		if err != nil {
-			return nil, fmt.Errorf("error fetching all projects: %w", err)
+			return nil, util.NewClientServerError(fmt.Sprintf("error fetching all projects: %v", err), http.StatusInternalServerError, err)
 		}
 		for i := range allProjects {
 			projects = append(projects, &allProjects[i])
@@ -252,7 +263,7 @@ func (t *analyzeTool) projects(ctx context.Context, id string) ([]map[string]int
 
 		projectFiles, err := t.SdkClient.AllProjectFiles(pID, "", nil)
 		if err != nil {
-			return nil, fmt.Errorf("error fetching files for project %s: %w", pName, err)
+			return nil, util.NewClientServerError(fmt.Sprintf("error fetching files for project %s: %v", pName, err), http.StatusInternalServerError, err)
 		}
 
 		modelCount := 0
@@ -287,21 +298,21 @@ func (t *analyzeTool) projects(ctx context.Context, id string) ([]map[string]int
 	return results, nil
 }
 
-func (t *analyzeTool) models(ctx context.Context, project, model string) ([]map[string]interface{}, error) {
+func (t *analyzeTool) models(ctx context.Context, project, model string) ([]map[string]interface{}, util.ToolboxError) {
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unable to get logger from ctx: %s", err)
+		return nil, util.NewClientServerError("unable to get logger from ctx", http.StatusInternalServerError, err)
 	}
 	logger.InfoContext(ctx, "Analyzing models...")
 
 	usedModels, err := t.getUsedModels(ctx)
 	if err != nil {
-		return nil, err
+		return nil, util.NewClientServerError("error fetching used models", http.StatusInternalServerError, err)
 	}
 
 	lookmlModels, err := t.SdkClient.AllLookmlModels(v4.RequestAllLookmlModels{}, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching LookML models: %w", err)
+		return nil, util.NewClientServerError("error fetching LookML models", http.StatusInternalServerError, err)
 	}
 
 	var results []map[string]interface{}
@@ -346,7 +357,7 @@ func (t *analyzeTool) getUsedModels(ctx context.Context) (map[string]int, error)
 	}
 	raw, err := lookercommon.RunInlineQuery(ctx, t.SdkClient, query, "json", nil)
 	if err != nil {
-		return nil, err
+		return nil, util.NewClientServerError(fmt.Sprintf("error running inline query for used models: %v", err), http.StatusInternalServerError, err)
 	}
 
 	var data []map[string]interface{}
@@ -361,7 +372,7 @@ func (t *analyzeTool) getUsedModels(ctx context.Context) (map[string]int, error)
 	return results, nil
 }
 
-func (t *analyzeTool) getUsedExploreFields(ctx context.Context, model, explore string) (map[string]int, error) {
+func (t *analyzeTool) getUsedExploreFields(ctx context.Context, model, explore string) (map[string]int, util.ToolboxError) {
 	limit := "5000"
 	query := &v4.WriteQuery{
 		Model:  "system__activity",
@@ -378,7 +389,7 @@ func (t *analyzeTool) getUsedExploreFields(ctx context.Context, model, explore s
 	}
 	raw, err := lookercommon.RunInlineQuery(ctx, t.SdkClient, query, "json", nil)
 	if err != nil {
-		return nil, err
+		return nil, util.NewClientServerError(fmt.Sprintf("error running inline query for used explore fields: %v", err), http.StatusInternalServerError, err)
 	}
 
 	var data []map[string]interface{}
@@ -408,16 +419,16 @@ func (t *analyzeTool) getUsedExploreFields(ctx context.Context, model, explore s
 	return results, nil
 }
 
-func (t *analyzeTool) explores(ctx context.Context, model, explore string) ([]map[string]interface{}, error) {
+func (t *analyzeTool) explores(ctx context.Context, model, explore string) ([]map[string]interface{}, util.ToolboxError) {
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unable to get logger from ctx: %s", err)
+		return nil, util.NewClientServerError("unable to get logger from ctx", http.StatusInternalServerError, err)
 	}
 	logger.InfoContext(ctx, "Analyzing explores...")
 
 	lookmlModels, err := t.SdkClient.AllLookmlModels(v4.RequestAllLookmlModels{}, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching LookML models: %w", err)
+		return nil, util.NewClientServerError(fmt.Sprintf("error fetching LookML models: %v", err), http.StatusInternalServerError, err)
 	}
 
 	var results []map[string]interface{}
@@ -524,7 +535,7 @@ func (t *analyzeTool) explores(ctx context.Context, model, explore string) ([]ma
 
 			rawQueryCount, err := lookercommon.RunInlineQuery(ctx, t.SdkClient, queryCountQueryBody, "json", nil)
 			if err != nil {
-				return nil, err
+				return nil, util.NewClientServerError(fmt.Sprintf("error running inline query for query count: %v", err), http.StatusInternalServerError, err)
 			}
 			queryCount := 0
 			var data []map[string]interface{}
@@ -554,3 +565,15 @@ func (t *analyzeTool) explores(ctx context.Context, model, explore string) ([]ma
 // =================================================================================================================
 // END LOOKER HEALTH ANALYZE CORE LOGIC
 // =================================================================================================================
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return "", err
+	}
+	return source.GetAuthTokenHeaderName(), nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.Parameters
+}
