@@ -18,24 +18,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
 
 	yaml "github.com/goccy/go-yaml"
-	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/sources/cloudsqlmysql"
-	"github.com/googleapis/genai-toolbox/internal/sources/mindsdb"
-	"github.com/googleapis/genai-toolbox/internal/sources/mysql"
 	"github.com/googleapis/genai-toolbox/internal/tools"
-	"github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqlcommon"
 	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 )
 
-const kind string = "mysql-sql"
+const resourceType string = "mysql-sql"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -49,18 +46,12 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	MySQLPool() *sql.DB
+	RunSQL(context.Context, string, []any) (any, error)
 }
-
-// validate compatible sources are still compatible
-var _ compatibleSource = &cloudsqlmysql.Source{}
-var _ compatibleSource = &mysql.Source{}
-var _ compatibleSource = &mindsdb.Source{}
-
-var compatibleSources = [...]string{cloudsqlmysql.SourceKind, mysql.SourceKind, mindsdb.SourceKind}
 
 type Config struct {
 	Name               string                `yaml:"name" validate:"required"`
-	Kind               string                `yaml:"kind" validate:"required"`
+	Type               string                `yaml:"type" validate:"required"`
 	Source             string                `yaml:"source" validate:"required"`
 	Description        string                `yaml:"description" validate:"required"`
 	Statement          string                `yaml:"statement" validate:"required"`
@@ -72,45 +63,22 @@ type Config struct {
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
-	// get dbName from underlying config
-	dbName := ""
-	switch real := rawS.(type) {
-	case interface{ DatabaseName() string }:
-		dbName = real.DatabaseName()
-	default:
-		return nil, fmt.Errorf("cannot resolve database name from source type")
-	}
-
 	allParameters, paramManifest, err := parameters.ProcessParameters(cfg.TemplateParameters, cfg.Parameters)
 	if err != nil {
 		return nil, err
 	}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, nil)
 
 	// finish tool setup
 	t := Tool{
 		Config:      cfg,
 		AllParams:   allParameters,
-		Pool:        s.MySQLPool(),
-		Database:    dbName,
 		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
 		mcpManifest: mcpManifest,
 	}
@@ -122,88 +90,38 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-	AllParams parameters.Parameters `yaml:"allParams"`
-
-	Pool        *sql.DB
-	Database    string
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
+	}
+
 	paramsMap := params.AsMap()
 	newStatement, err := parameters.ResolveTemplateParams(t.TemplateParameters, t.Statement, paramsMap)
 	if err != nil {
-		return nil, fmt.Errorf("unable to extract template params %w", err)
-	}
-
-	// Validate SQL to prevent access to other databases
-	if err := customutil.ValidateSQLForDatabase(newStatement, t.Database); err != nil {
-		return nil, fmt.Errorf("SQL validation failed: %w", err)
+		return nil, util.NewAgentError("unable to extract template params", err)
 	}
 
 	newParams, err := parameters.GetParams(t.Parameters, paramsMap)
 	if err != nil {
-		return nil, fmt.Errorf("unable to extract standard params %w", err)
+		return nil, util.NewAgentError("unable to extract standard params", err)
 	}
 
 	sliceParams := newParams.AsSlice()
-	results, err := t.Pool.QueryContext(ctx, newStatement, sliceParams...)
+	resp, err := source.RunSQL(ctx, newStatement, sliceParams)
 	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
+		return nil, util.ProcessGeneralError(err)
 	}
-
-	cols, err := results.Columns()
-	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve rows column name: %w", err)
-	}
-
-	// create an array of values for each column, which can be re-used to scan each row
-	rawValues := make([]any, len(cols))
-	values := make([]any, len(cols))
-	for i := range rawValues {
-		values[i] = &rawValues[i]
-	}
-	defer results.Close()
-
-	colTypes, err := results.ColumnTypes()
-	if err != nil {
-		return nil, fmt.Errorf("unable to get column types: %w", err)
-	}
-
-	var out []any
-	for results.Next() {
-		err := results.Scan(values...)
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
-		}
-		vMap := make(map[string]any)
-		for i, name := range cols {
-			val := rawValues[i]
-			if val == nil {
-				vMap[name] = nil
-				continue
-			}
-
-			vMap[name], err = mysqlcommon.ConvertToType(colTypes[i], val)
-			if err != nil {
-				return nil, fmt.Errorf("errors encountered when converting values: %w", err)
-			}
-		}
-		out = append(out, vMap)
-	}
-
-	if err := results.Err(); err != nil {
-		return nil, fmt.Errorf("errors encountered during row iteration: %w", err)
-	}
-
-	util.LogAndPostBilling(ctx, t.Kind, len(out), newStatement)
-
-	return out, nil
+	return resp, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.AllParams, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.AllParams, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -218,10 +136,18 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
 }
 
 func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.AllParams
 }

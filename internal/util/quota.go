@@ -71,7 +71,8 @@ func QuotaEnforcementFromContext(ctx context.Context) (bool, bool) {
 	return false, false
 }
 
-// No additional flags; presence of quotaEndpoint implies strict enforcement.
+// Quota preflight runs when quotaEndpoint is set on the request context (see server middleware).
+// requireQuotaPreflight / WithQuotaEnforcement is retained for compatibility but does not gate CheckQuotaAndAuthorize.
 
 // Shared HTTP client for quota checks
 var quotaHTTPClient = &http.Client{Timeout: 60 * time.Second}
@@ -164,12 +165,9 @@ func CheckQuotaAndAuthorize(ctx context.Context, tool string, requestedRows *int
 	}
 	defer resp.Body.Close()
 
-	// Read small body for messages
-	var bodySnippet []byte
-	if resp.ContentLength != 0 {
-		bodySnippet, _ = io.ReadAll(io.LimitReader(resp.Body, 4096))
-		io.Copy(io.Discard, resp.Body)
-	}
+	// Always read body (Content-Length may be 0 or unset with chunked encoding).
+	bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	// Parse response JSON if available
 	parseAllowed := func(b []byte) (bool, string) {
@@ -190,6 +188,13 @@ func CheckQuotaAndAuthorize(ctx context.Context, tool string, requestedRows *int
 		if allowed {
 			remaining = -1
 		}
+		if logger != nil && !allowed {
+			if reason != "" {
+				logger.WarnContext(context.Background(), "quota: denied", "reason", reason, "status", resp.Status)
+			} else {
+				logger.WarnContext(context.Background(), "quota: denied", "status", resp.Status)
+			}
+		}
 		return allowed, remaining, reason, nil
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden:
 		allowed, reason := parseAllowed(bodySnippet)
@@ -197,12 +202,39 @@ func CheckQuotaAndAuthorize(ctx context.Context, tool string, requestedRows *int
 		if allowed {
 			remaining = -1
 		}
+		if logger != nil && !allowed {
+			if reason != "" {
+				logger.WarnContext(context.Background(), "quota: denied", "reason", reason, "status", resp.Status)
+			} else {
+				logger.WarnContext(context.Background(), "quota: denied", "status", resp.Status)
+			}
+		}
+		return allowed, remaining, reason, nil
+	case resp.StatusCode == http.StatusBadRequest:
+		// Some authorize APIs return 400 with {allowed:false} or {error:"..."} instead of 429.
+		allowed, reason := parseAllowed(bodySnippet)
+		remaining := 0
+		if allowed {
+			remaining = -1
+		}
+		if logger != nil && !allowed {
+			if reason != "" {
+				logger.WarnContext(context.Background(), "quota: denied", "reason", reason, "status", resp.Status)
+			} else if len(bodySnippet) > 0 {
+				logger.WarnContext(context.Background(), "quota: denied", "body", string(bodySnippet), "status", resp.Status)
+			} else {
+				logger.WarnContext(context.Background(), "quota: denied", "status", resp.Status)
+			}
+		}
 		return allowed, remaining, reason, nil
 	default:
-		// Other server/client errors → return transport error for caller policy
+		// Other server/client errors → return transport error for caller policy (e.g. 401 Unauthorized, 500)
 		msg := fmt.Sprintf("quota unexpected status: %s", resp.Status)
 		if len(bodySnippet) > 0 {
 			msg = fmt.Sprintf("%s, body: %s", msg, string(bodySnippet))
+		}
+		if logger != nil {
+			logger.WarnContext(context.Background(), "quota: upstream error response", "status", resp.Status, "detail", msg)
 		}
 		return false, 0, msg, fmt.Errorf("%s", msg)
 	}

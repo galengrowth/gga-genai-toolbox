@@ -17,21 +17,23 @@ package alloydbainl
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	yaml "github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/sources/alloydbpg"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const kind string = "alloydb-ai-nl"
+const resourceType string = "alloydb-ai-nl"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -45,16 +47,12 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	PostgresPool() *pgxpool.Pool
+	RunSQL(context.Context, string, []any) (any, error)
 }
-
-// validate compatible sources are still compatible
-var _ compatibleSource = &alloydbpg.Source{}
-
-var compatibleSources = [...]string{alloydbpg.SourceKind}
 
 type Config struct {
 	Name               string                `yaml:"name" validate:"required"`
-	Kind               string                `yaml:"kind" validate:"required"`
+	Type               string                `yaml:"type" validate:"required"`
 	Source             string                `yaml:"source" validate:"required"`
 	Description        string                `yaml:"description" validate:"required"`
 	NLConfig           string                `yaml:"nlConfig" validate:"required"`
@@ -65,23 +63,11 @@ type Config struct {
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(compatibleSource)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be one of %q", kind, compatibleSources)
-	}
-
 	numParams := len(cfg.NLConfigParameters)
 	quotedNameParts := make([]string, 0, numParams)
 	placeholderParts := make([]string, 0, numParams)
@@ -93,26 +79,21 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		placeholderParts = append(placeholderParts, fmt.Sprintf("$%d", i+3)) // $1, $2 reserved
 	}
 
-	var paramNamesSQL string
-	var paramValuesSQL string
-
+	var stmt string
 	if numParams > 0 {
-		paramNamesSQL = fmt.Sprintf("ARRAY[%s]", strings.Join(quotedNameParts, ", "))
-		paramValuesSQL = fmt.Sprintf("ARRAY[%s]", strings.Join(placeholderParts, ", "))
+		paramNamesSQL := fmt.Sprintf("ARRAY[%s]", strings.Join(quotedNameParts, ", "))
+		paramValuesSQL := fmt.Sprintf("ARRAY[%s]", strings.Join(placeholderParts, ", "))
+		// execute_nl_query is the AlloyDB AI function that executes the natural language query
+		// The first parameter is the natural language query, which is passed as $1
+		// The second parameter is the NLConfig, which is passed as a $2
+		// The following params are the list of PSV values passed to the NLConfig
+		// Example SQL statement being executed:
+		// SELECT alloydb_ai_nl.execute_nl_query(nl_question => 'How many tickets do I have?', nl_config_id => 'cymbal_air_nl_config', param_names => ARRAY ['user_email'], param_values => ARRAY ['hailongli@google.com']);
+		stmtFormat := "SELECT alloydb_ai_nl.execute_nl_query(nl_question => $1, nl_config_id => $2, param_names => %s, param_values => %s);"
+		stmt = fmt.Sprintf(stmtFormat, paramNamesSQL, paramValuesSQL)
 	} else {
-		paramNamesSQL = "ARRAY[]::TEXT[]"
-		paramValuesSQL = "ARRAY[]::TEXT[]"
+		stmt = "SELECT alloydb_ai_nl.execute_nl_query(nl_question => $1, nl_config_id => $2);"
 	}
-
-	// execute_nl_query is the AlloyDB AI function that executes the natural language query
-	// The first parameter is the natural language query, which is passed as $1
-	// The second parameter is the NLConfig, which is passed as a $2
-	// The following params are the list of PSV values passed to the NLConfig
-	// Example SQL statement being executed:
-	// SELECT alloydb_ai_nl.execute_nl_query(nl_question => 'How many tickets do I have?', nl_config_id => 'cymbal_air_nl_config', param_names => ARRAY ['user_email'], param_values => ARRAY ['hailongli@google.com']);
-	stmtFormat := "SELECT alloydb_ai_nl.execute_nl_query(nl_question => $1, nl_config_id => $2, param_names => %s, param_values => %s);"
-	stmt := fmt.Sprintf(stmtFormat, paramNamesSQL, paramValuesSQL)
-
 	newQuestionParam := parameters.NewStringParameter(
 		"question",                              // name
 		"The natural language question to ask.", // description
@@ -120,13 +101,12 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 
 	cfg.NLConfigParameters = append([]parameters.Parameter{newQuestionParam}, cfg.NLConfigParameters...)
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, cfg.NLConfigParameters)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, cfg.NLConfigParameters, nil)
 
 	t := Tool{
 		Config:      cfg,
 		Parameters:  cfg.NLConfigParameters,
 		Statement:   stmt,
-		Pool:        s.PostgresPool(),
 		manifest:    tools.Manifest{Description: cfg.Description, Parameters: cfg.NLConfigParameters.Manifest(), AuthRequired: cfg.AuthRequired},
 		mcpManifest: mcpManifest,
 	}
@@ -139,9 +119,7 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-	Parameters parameters.Parameters `yaml:"parameters"`
-
-	Pool        *pgxpool.Pool
+	Parameters  parameters.Parameters `yaml:"parameters"`
 	Statement   string
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
@@ -151,7 +129,12 @@ func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
+	}
+
 	sliceParams := params.AsSlice()
 	allParamValues := make([]any, len(sliceParams)+1)
 	allParamValues[0] = fmt.Sprintf("%s", sliceParams[0]) // nl_question
@@ -160,35 +143,15 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 		allParamValues[i+2] = fmt.Sprintf("%s", param)
 	}
 
-	results, err := t.Pool.Query(ctx, t.Statement, allParamValues...)
+	resp, err := source.RunSQL(ctx, t.Statement, allParamValues)
 	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w. Query: %v , Values: %v. Toolbox v0.19.0+ is only compatible with AlloyDB AI NL v1.0.3+. Please ensure that you are using the latest AlloyDB AI NL extension", err, t.Statement, allParamValues)
+		return nil, util.NewClientServerError(fmt.Sprintf("error running SQL query: %v. Query: %v , Values: %v. Toolbox v0.19.0+ is only compatible with AlloyDB AI NL v1.0.3+. Please ensure that you are using the latest AlloyDB AI NL extension", err, t.Statement, allParamValues), http.StatusBadRequest, err)
 	}
-
-	fields := results.FieldDescriptions()
-
-	var out []any
-	for results.Next() {
-		v, err := results.Values()
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse row: %w", err)
-		}
-		vMap := make(map[string]any)
-		for i, f := range fields {
-			vMap[f.Name] = v[i]
-		}
-		out = append(out, vMap)
-	}
-	// this will catch actual query execution errors
-	if err := results.Err(); err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
-	}
-
-	return out, nil
+	return resp, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.Parameters, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.Parameters, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -203,6 +166,14 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.Parameters
 }

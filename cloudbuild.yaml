@@ -1,3 +1,10 @@
+# Public base URL of the Toolbox / MCP service (used for PRM and WWW-Authenticate when authzero or generic has mcpEnabled).
+# Override per trigger if your Cloud Run URLs differ.
+substitutions:
+  _TOOLBOX_URL_DEV: 'https://mcp-dev.healthtechalpha.com'
+  _TOOLBOX_URL_STAGE: 'https://mcp-stage.healthtechalpha.com'
+  _TOOLBOX_URL_LIVE: 'https://mcp.healthtechalpha.com'
+
 steps:
   # Step 1: Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
@@ -37,12 +44,15 @@ steps:
         if [ "${BRANCH_NAME}" = "dev" ]; then
           SERVICE_NAME="mcp-toolbox-dev"
           SECRET_NAME="mcp-toolbox-dev"
+          TOOLBOX_PUBLIC_URL="${_TOOLBOX_URL_DEV}"
         elif [ "${BRANCH_NAME}" = "stage" ]; then
           SERVICE_NAME="mcp-toolbox-stage"
           SECRET_NAME="mcp-toolbox-stage"
+          TOOLBOX_PUBLIC_URL="${_TOOLBOX_URL_STAGE}"
         elif [ "${BRANCH_NAME}" = "master" ]; then
           SERVICE_NAME="mcp-toolbox-live"
           SECRET_NAME="mcp-toolbox-live"
+          TOOLBOX_PUBLIC_URL="${_TOOLBOX_URL_LIVE}"
         else
           echo "ERROR: Unsupported branch ${BRANCH_NAME}"
           exit 1
@@ -50,6 +60,7 @@ steps:
 
         echo "Deploying to Cloud Run service: $$SERVICE_NAME"
         echo "Using secret: $$SECRET_NAME"
+        echo "TOOLBOX_URL (MCP PRM / auth): $$TOOLBOX_PUBLIC_URL"
 
         gcloud run deploy "$$SERVICE_NAME" \
           --image "us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest" \
@@ -58,9 +69,10 @@ steps:
           --allow-unauthenticated \
           --service-account "toolbox-identity@$PROJECT_ID.iam.gserviceaccount.com" \
           --set-secrets "/app/tools.yaml=$$SECRET_NAME:latest" \
+          --set-env-vars="TOOLBOX_URL=$$TOOLBOX_PUBLIC_URL" \
           --timeout "1200s" \
           --labels "branch=${BRANCH_NAME},commit=${SHORT_SHA}" \
-          --args="--tools-file=/app/tools.yaml,--address=0.0.0.0,--port=8080"
+          --args="--config=/app/tools.yaml,--address=0.0.0.0,--port=8080"
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/mcp-toolbox-repo/genai-toolbox:${BRANCH_NAME}-latest'

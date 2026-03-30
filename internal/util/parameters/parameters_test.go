@@ -1362,6 +1362,25 @@ func TestParametersParse(t *testing.T) {
 			}
 		})
 	}
+	t.Run("CheckNullForRequiredParam", func(t *testing.T) {
+		// Define a required string parameter
+		params := parameters.Parameters{
+			parameters.NewStringParameter("required_param", "this is required"),
+		}
+
+		// Input map with explicit nil
+		input := map[string]any{
+			"required_param": nil,
+		}
+
+		// Call ParseParams
+		_, err := parameters.ParseParams(params, input, nil)
+
+		// Expect an error because the parameter is required
+		if err == nil {
+			t.Errorf("ParseParams allowed explicit nil for required parameter, expected error")
+		}
+	})
 }
 
 func TestAuthParametersParse(t *testing.T) {
@@ -1625,22 +1644,22 @@ func TestParamManifest(t *testing.T) {
 		{
 			name: "string default",
 			in:   parameters.NewStringParameterWithDefault("foo-string", "foo", "bar"),
-			want: parameters.ParameterManifest{Name: "foo-string", Type: "string", Required: false, Description: "bar", AuthServices: []string{}},
+			want: parameters.ParameterManifest{Name: "foo-string", Type: "string", Required: false, Description: "bar", Default: "foo", AuthServices: []string{}},
 		},
 		{
 			name: "int default",
 			in:   parameters.NewIntParameterWithDefault("foo-int", 1, "bar"),
-			want: parameters.ParameterManifest{Name: "foo-int", Type: "integer", Required: false, Description: "bar", AuthServices: []string{}},
+			want: parameters.ParameterManifest{Name: "foo-int", Type: "integer", Required: false, Description: "bar", Default: 1, AuthServices: []string{}},
 		},
 		{
 			name: "float default",
 			in:   parameters.NewFloatParameterWithDefault("foo-float", 1.1, "bar"),
-			want: parameters.ParameterManifest{Name: "foo-float", Type: "float", Required: false, Description: "bar", AuthServices: []string{}},
+			want: parameters.ParameterManifest{Name: "foo-float", Type: "float", Required: false, Description: "bar", Default: 1.1, AuthServices: []string{}},
 		},
 		{
 			name: "boolean default",
 			in:   parameters.NewBooleanParameterWithDefault("foo-bool", true, "bar"),
-			want: parameters.ParameterManifest{Name: "foo-bool", Type: "boolean", Required: false, Description: "bar", AuthServices: []string{}},
+			want: parameters.ParameterManifest{Name: "foo-bool", Type: "boolean", Required: false, Description: "bar", Default: true, AuthServices: []string{}},
 		},
 		{
 			name: "array default",
@@ -1650,6 +1669,7 @@ func TestParamManifest(t *testing.T) {
 				Type:         "array",
 				Required:     false,
 				Description:  "bar",
+				Default:      []any{"foo", "bar"},
 				AuthServices: []string{},
 				Items:        &parameters.ParameterManifest{Name: "foo-string", Type: "string", Required: false, Description: "bar", AuthServices: []string{}},
 			},
@@ -1841,7 +1861,7 @@ func TestMcpManifest(t *testing.T) {
 			wantSchema: parameters.McpToolsSchema{
 				Type: "object",
 				Properties: map[string]parameters.ParameterMcpManifest{
-					"foo-string":       {Type: "string", Description: "bar"},
+					"foo-string":       {Type: "string", Description: "bar", Default: "foo"},
 					"foo-string2":      {Type: "string", Description: "bar"},
 					"foo-string3-auth": {Type: "string", Description: "bar"},
 					"foo-int2":         {Type: "integer", Description: "bar"},
