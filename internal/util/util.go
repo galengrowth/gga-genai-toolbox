@@ -17,9 +17,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -27,6 +27,9 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/log"
 	"github.com/googleapis/genai-toolbox/internal/telemetry"
 )
+
+// GDAClientID is the client ID for Gemini Data Analytics
+const GDAClientID = "GENAI_TOOLBOX"
 
 // DecodeJSON decodes a given reader into an interface using the json decoder.
 func DecodeJSON(r io.Reader, v interface{}) error {
@@ -119,6 +122,30 @@ func UserAgentFromContext(ctx context.Context) (string, error) {
 	}
 }
 
+type UserAgentRoundTripper struct {
+	userAgent string
+	next      http.RoundTripper
+}
+
+func NewUserAgentRoundTripper(ua string, next http.RoundTripper) *UserAgentRoundTripper {
+	return &UserAgentRoundTripper{
+		userAgent: ua,
+		next:      next,
+	}
+}
+
+func (rt *UserAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// create a deep copy of the request
+	newReq := req.Clone(req.Context())
+	ua := newReq.Header.Get("User-Agent")
+	if ua == "" {
+		newReq.Header.Set("User-Agent", rt.userAgent)
+	} else {
+		newReq.Header.Set("User-Agent", ua+" "+rt.userAgent)
+	}
+	return rt.next.RoundTrip(newReq)
+}
+
 func NewStrictDecoder(v interface{}) (*yaml.Decoder, error) {
 	b, err := yaml.Marshal(v)
 	if err != nil {
@@ -164,4 +191,26 @@ func InstrumentationFromContext(ctx context.Context) (*telemetry.Instrumentation
 	return nil, fmt.Errorf("unable to retrieve instrumentation")
 }
 
-var ErrUnauthorized = errors.New("unauthorized")
+// GenAIMetricAttrs holds gen_ai and network attributes for metrics
+type GenAIMetricAttrs struct {
+	OperationName          string
+	ToolName               string
+	PromptName             string
+	NetworkProtocolName    string
+	NetworkProtocolVersion string
+}
+
+const genAIMetricAttrsKey contextKey = "genAIMetricAttrs"
+
+// WithGenAIMetricAttrs adds GenAIMetricAttrs to the context
+func WithGenAIMetricAttrs(ctx context.Context, attrs *GenAIMetricAttrs) context.Context {
+	return context.WithValue(ctx, genAIMetricAttrsKey, attrs)
+}
+
+// GenAIMetricAttrsFromContext retrieves GenAIMetricAttrs from context
+func GenAIMetricAttrsFromContext(ctx context.Context) *GenAIMetricAttrs {
+	if attrs, ok := ctx.Value(genAIMetricAttrsKey).(*GenAIMetricAttrs); ok {
+		return attrs
+	}
+	return nil
+}

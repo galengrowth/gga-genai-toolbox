@@ -15,26 +15,27 @@ package mongodbfindone
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 
 	"github.com/goccy/go-yaml"
-	mongosrc "github.com/googleapis/genai-toolbox/internal/sources/mongodb"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
+	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 )
 
-const kind string = "mongodb-find-one"
+const resourceType string = "mongodb-find-one"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -46,44 +47,36 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	MongoClient() *mongo.Client
+	FindOne(context.Context, string, string, string, *options.FindOneOptionsBuilder) ([]any, error)
+}
+
 type Config struct {
-	Name           string                `yaml:"name" validate:"required"`
-	Kind           string                `yaml:"kind" validate:"required"`
-	Source         string                `yaml:"source" validate:"required"`
-	AuthRequired   []string              `yaml:"authRequired" validate:"required"`
-	Description    string                `yaml:"description" validate:"required"`
-	Database       string                `yaml:"database" validate:"required"`
-	Collection     string                `yaml:"collection" validate:"required"`
-	FilterPayload  string                `yaml:"filterPayload" validate:"required"`
-	FilterParams   parameters.Parameters `yaml:"filterParams"`
-	ProjectPayload string                `yaml:"projectPayload"`
-	ProjectParams  parameters.Parameters `yaml:"projectParams"`
-	SortPayload    string                `yaml:"sortPayload"`
-	SortParams     parameters.Parameters `yaml:"sortParams"`
+	Name           string                 `yaml:"name" validate:"required"`
+	Type           string                 `yaml:"type" validate:"required"`
+	Source         string                 `yaml:"source" validate:"required"`
+	AuthRequired   []string               `yaml:"authRequired" validate:"required"`
+	Description    string                 `yaml:"description" validate:"required"`
+	Database       string                 `yaml:"database" validate:"required"`
+	Collection     string                 `yaml:"collection" validate:"required"`
+	FilterPayload  string                 `yaml:"filterPayload" validate:"required"`
+	FilterParams   parameters.Parameters  `yaml:"filterParams"`
+	ProjectPayload string                 `yaml:"projectPayload"`
+	ProjectParams  parameters.Parameters  `yaml:"projectParams"`
+	Annotations    *tools.ToolAnnotations `yaml:"annotations,omitempty"`
 }
 
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(*mongosrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `mongodb`", kind)
-	}
-
 	// Create a slice for all parameters
-	allParameters := slices.Concat(cfg.FilterParams, cfg.ProjectParams, cfg.SortParams)
+	allParameters := slices.Concat(cfg.FilterParams, cfg.ProjectParams)
 
 	// Verify no duplicate parameter names
 	err := parameters.CheckDuplicateParameters(allParameters)
@@ -98,14 +91,14 @@ func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error)
 		paramManifest = make([]parameters.ParameterManifest, 0)
 	}
 
-	// Create MCP manifest
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters)
+	// Create MCP manifest with annotations
+	annotations := tools.GetAnnotationsOrDefault(cfg.Annotations, tools.NewReadOnlyAnnotations)
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, allParameters, annotations)
 
 	// finish tool setup
 	return Tool{
 		Config:      cfg,
 		AllParams:   allParameters,
-		database:    s.Client.Database(cfg.Database),
 		manifest:    tools.Manifest{Description: cfg.Description, Parameters: paramManifest, AuthRequired: cfg.AuthRequired},
 		mcpManifest: mcpManifest,
 	}, nil
@@ -116,86 +109,45 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-	AllParams parameters.Parameters `yaml:"allParams"`
-
-	database    *mongo.Database
+	AllParams   parameters.Parameters `yaml:"allParams"`
 	manifest    tools.Manifest
 	mcpManifest tools.McpManifest
 }
 
-func getOptions(sortParameters parameters.Parameters, projectPayload string, paramsMap map[string]any) (*options.FindOneOptions, error) {
-	opts := options.FindOne()
-
-	sort := bson.M{}
-	for _, p := range sortParameters {
-		sort[p.GetName()] = paramsMap[p.GetName()]
-	}
-	opts = opts.SetSort(sort)
-
-	if len(projectPayload) == 0 {
-		return opts, nil
-	}
-
-	result, err := parameters.PopulateTemplateWithJSON("MongoDBFindOneProjectString", projectPayload, paramsMap)
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
 	if err != nil {
-		return nil, fmt.Errorf("error populating project payload: %s", err)
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
 	}
 
-	var projection any
-	err = bson.UnmarshalExtJSON([]byte(result), false, &projection)
-	if err != nil {
-		return nil, fmt.Errorf("error unmarshalling projection: %s", err)
-	}
-	opts = opts.SetProjection(projection)
-
-	return opts, nil
-}
-
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
 	paramsMap := params.AsMap()
-
 	filterString, err := parameters.PopulateTemplateWithJSON("MongoDBFindOneFilterString", t.FilterPayload, paramsMap)
-
 	if err != nil {
-		return nil, fmt.Errorf("error populating filter: %s", err)
+		return nil, util.NewAgentError("error populating filter", err)
 	}
 
-	opts, err := getOptions(t.SortParams, t.ProjectPayload, paramsMap)
+	opts := options.FindOne()
+	if len(t.ProjectPayload) > 0 {
+		result, err := parameters.PopulateTemplateWithJSON("MongoDBFindOneProjectString", t.ProjectPayload, paramsMap)
+		if err != nil {
+			return nil, util.NewAgentError("error populating project payload", err)
+		}
+		var projection any
+		err = bson.UnmarshalExtJSON([]byte(result), false, &projection)
+		if err != nil {
+			return nil, util.NewAgentError("error unmarshalling projection", err)
+		}
+		opts = opts.SetProjection(projection)
+	}
+	resp, err := source.FindOne(ctx, filterString, t.Database, t.Collection, opts)
 	if err != nil {
-		return nil, fmt.Errorf("error populating options: %s", err)
+		return nil, util.ProcessGeneralError(err)
 	}
-
-	var filter = bson.D{}
-	err = bson.UnmarshalExtJSON([]byte(filterString), false, &filter)
-	if err != nil {
-		return nil, err
-	}
-
-	res := t.database.Collection(t.Collection).FindOne(ctx, filter, opts)
-	if res.Err() != nil {
-		return nil, res.Err()
-	}
-
-	var data any
-	err = res.Decode(&data)
-	if err != nil {
-		return nil, err
-	}
-
-	var final []any
-	tmp, _ := bson.MarshalExtJSON(data, false, false)
-	var tmp2 any
-	err = json.Unmarshal(tmp, &tmp2)
-	if err != nil {
-		return nil, err
-	}
-	final = append(final, tmp2)
-
-	return final, err
+	return resp, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
-	return parameters.ParseParams(t.AllParams, data, claims)
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
+	return parameters.EmbedParams(ctx, t.AllParams, paramValues, embeddingModelsMap, nil)
 }
 
 func (t Tool) Manifest() tools.Manifest {
@@ -210,10 +162,18 @@ func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return false
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	return false, nil
 }
 
 func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
+}
+
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	return "Authorization", nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.AllParams
 }

@@ -18,9 +18,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/tools/mongodb/mongodbinsertone"
 
-	yaml "github.com/goccy/go-yaml"
 	"github.com/google/go-cmp/cmp"
 	"github.com/googleapis/genai-toolbox/internal/server"
 	"github.com/googleapis/genai-toolbox/internal/testutils"
@@ -39,19 +39,43 @@ func TestParseFromYamlMongoQuery(t *testing.T) {
 		{
 			desc: "basic example",
 			in: `
-			tools:
-				example_tool:
-					kind: mongodb-insert-one
-					source: my-instance
-					description: some description
-					database: test_db
-					collection: test_coll
-					canonical: true
+            kind: tool
+            name: example_tool
+            type: mongodb-insert-one
+            source: my-instance
+            description: some description
+            database: test_db
+            collection: test_coll
 			`,
 			want: server.ToolConfigs{
 				"example_tool": mongodbinsertone.Config{
 					Name:         "example_tool",
-					Kind:         "mongodb-insert-one",
+					Type:         "mongodb-insert-one",
+					Source:       "my-instance",
+					AuthRequired: []string{},
+					Database:     "test_db",
+					Collection:   "test_coll",
+					Canonical:    false,
+					Description:  "some description",
+				},
+			},
+		},
+		{
+			desc: "true canonical",
+			in: `
+            kind: tool
+            name: example_tool
+            type: mongodb-insert-one
+            source: my-instance
+            description: some description
+            database: test_db
+            collection: test_coll
+            canonical: true
+			`,
+			want: server.ToolConfigs{
+				"example_tool": mongodbinsertone.Config{
+					Name:         "example_tool",
+					Type:         "mongodb-insert-one",
 					Source:       "my-instance",
 					AuthRequired: []string{},
 					Database:     "test_db",
@@ -61,23 +85,70 @@ func TestParseFromYamlMongoQuery(t *testing.T) {
 				},
 			},
 		},
+		{
+			desc: "false canonical",
+			in: `
+            kind: tool
+            name: example_tool
+            type: mongodb-insert-one
+            source: my-instance
+            description: some description
+            database: test_db
+            collection: test_coll
+            canonical: false
+			`,
+			want: server.ToolConfigs{
+				"example_tool": mongodbinsertone.Config{
+					Name:         "example_tool",
+					Type:         "mongodb-insert-one",
+					Source:       "my-instance",
+					AuthRequired: []string{},
+					Database:     "test_db",
+					Collection:   "test_coll",
+					Canonical:    false,
+					Description:  "some description",
+				},
+			},
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.desc, func(t *testing.T) {
-			got := struct {
-				Tools server.ToolConfigs `yaml:"tools"`
-			}{}
-			// Parse contents
-			err := yaml.UnmarshalContext(ctx, testutils.FormatYaml(tc.in), &got)
+			_, _, _, got, _, _, err := server.UnmarshalResourceConfig(ctx, testutils.FormatYaml(tc.in))
 			if err != nil {
 				t.Fatalf("unable to unmarshal: %s", err)
 			}
-			if diff := cmp.Diff(tc.want, got.Tools); diff != "" {
+			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Fatalf("incorrect parse: diff %v", diff)
 			}
 		})
 	}
 
+}
+
+func TestAnnotations(t *testing.T) {
+	// Test default annotations for destructive tool
+	t.Run("default annotations", func(t *testing.T) {
+		annotations := tools.GetAnnotationsOrDefault(nil, tools.NewDestructiveAnnotations)
+		if annotations == nil {
+			t.Fatal("expected non-nil annotations")
+		}
+		if annotations.DestructiveHint == nil || *annotations.DestructiveHint != true {
+			t.Error("expected destructiveHint to be true")
+		}
+		if annotations.ReadOnlyHint == nil || *annotations.ReadOnlyHint != false {
+			t.Error("expected readOnlyHint to be false")
+		}
+	})
+
+	// Test custom annotations override default
+	t.Run("custom annotations", func(t *testing.T) {
+		customDestructive := false
+		custom := &tools.ToolAnnotations{DestructiveHint: &customDestructive}
+		annotations := tools.GetAnnotationsOrDefault(custom, tools.NewDestructiveAnnotations)
+		if annotations.DestructiveHint == nil || *annotations.DestructiveHint != false {
+			t.Error("expected custom destructiveHint to be false")
+		}
+	})
 }
 
 func TestFailParseFromYamlMongoQuery(t *testing.T) {
@@ -93,24 +164,20 @@ func TestFailParseFromYamlMongoQuery(t *testing.T) {
 		{
 			desc: "Invalid method",
 			in: `
-			tools:
-				example_tool:
-					kind: mongodb-insert-one
-					source: my-instance
-					description: some description
-					collection: test_coll
-					canonical: true
+            kind: tool
+            name: example_tool
+            type: mongodb-insert-one
+            source: my-instance
+            description: some description
+            collection: test_coll
+            canonical: true
 			`,
-			err: `unable to parse tool "example_tool" as kind "mongodb-insert-one"`,
+			err: `unable to parse tool "example_tool" as type "mongodb-insert-one"`,
 		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.desc, func(t *testing.T) {
-			got := struct {
-				Tools server.ToolConfigs `yaml:"tools"`
-			}{}
-			// Parse contents
-			err := yaml.UnmarshalContext(ctx, testutils.FormatYaml(tc.in), &got)
+			_, _, _, _, _, _, err := server.UnmarshalResourceConfig(ctx, testutils.FormatYaml(tc.in))
 			if err == nil {
 				t.Fatalf("expect parsing to fail")
 			}

@@ -29,6 +29,7 @@ import (
 
 	"github.com/googleapis/genai-toolbox/internal/log"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp/jsonrpc"
+	"github.com/googleapis/genai-toolbox/internal/server/resources"
 	"github.com/googleapis/genai-toolbox/internal/telemetry"
 )
 
@@ -36,6 +37,7 @@ const jsonrpcVersion = "2.0"
 const protocolVersion20241105 = "2024-11-05"
 const protocolVersion20250326 = "2025-03-26"
 const protocolVersion20250618 = "2025-06-18"
+const protocolVersion20251125 = "2025-11-25"
 const serverName = "Toolbox"
 
 var basicInputSchema = map[string]any{
@@ -229,7 +231,7 @@ func TestMcpEndpointWithoutInitialized(t *testing.T) {
 				"id":      "tools-call-tool4",
 				"error": map[string]any{
 					"code":    -32600.0,
-					"message": "unauthorized Tool call: Please make sure your specify correct auth headers: unauthorized",
+					"message": "unauthorized Tool call: Please make sure you specify correct auth headers",
 				},
 			},
 		},
@@ -318,7 +320,7 @@ func TestMcpEndpointWithoutInitialized(t *testing.T) {
 				Params: map[string]any{
 					"name": "prompt2",
 					"arguments": map[string]any{
-						"arg1": 42, // prompt2 expects a string, we send a number
+						"arg1": 42,
 					},
 				},
 			},
@@ -484,6 +486,23 @@ func TestMcpEndpoint(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:     "version 2025-11-25",
+			protocol: protocolVersion20251125,
+			idHeader: false,
+			initWant: map[string]any{
+				"jsonrpc": "2.0",
+				"id":      "mcp-initialize",
+				"result": map[string]any{
+					"protocolVersion": "2025-11-25",
+					"capabilities": map[string]any{
+						"tools":   map[string]any{"listChanged": false},
+						"prompts": map[string]any{"listChanged": false},
+					},
+					"serverInfo": map[string]any{"name": serverName, "version": fakeVersionString},
+				},
+			},
+		},
 	}
 	for _, vtc := range versTestCases {
 		t.Run(vtc.name, func(t *testing.T) {
@@ -493,8 +512,7 @@ func TestMcpEndpoint(t *testing.T) {
 			if sessionId != "" {
 				header["Mcp-Session-Id"] = sessionId
 			}
-
-			if vtc.protocol == protocolVersion20250618 {
+			if vtc.protocol != protocolVersion20241105 && vtc.protocol != protocolVersion20250326 {
 				header["MCP-Protocol-Version"] = vtc.protocol
 			}
 
@@ -816,7 +834,7 @@ func TestMcpEndpoint(t *testing.T) {
 						"id":      "tools-call-tool4",
 						"error": map[string]any{
 							"code":    -32600.0,
-							"message": "unauthorized Tool call: Please make sure your specify correct auth headers: unauthorized",
+							"message": "unauthorized Tool call: Please make sure you specify correct auth headers",
 						},
 					},
 				},
@@ -1106,7 +1124,7 @@ func TestStdioSession(t *testing.T) {
 
 	sseManager := newSseManager(ctx)
 
-	resourceManager := NewResourceManager(nil, nil, toolsMap, toolsets, promptsMap, promptsets)
+	resourceManager := resources.NewResourceManager(nil, nil, nil, toolsMap, toolsets, promptsMap, promptsets)
 
 	server := &Server{
 		version:         fakeVersionString,
@@ -1148,5 +1166,37 @@ func TestStdioSession(t *testing.T) {
 	want := fmt.Sprintf(`"%s"`, write) + "\n"
 	if read != want {
 		t.Fatalf("unexpected read: got %s, want %s", read, want)
+	}
+}
+
+func TestSseManagerGetNonExistentSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := newSseManager(ctx)
+
+	// Must not panic when session ID doesn't exist in the map.
+	session, ok := m.get("non-existent-id")
+	if ok {
+		t.Error("expected ok to be false for non-existent session")
+	}
+	if session != nil {
+		t.Error("expected nil session for non-existent ID")
+	}
+}
+
+func TestSseManagerGetNilSessionValue(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := newSseManager(ctx)
+	m.sseSessions["nil-session-id"] = nil
+
+	session, ok := m.get("nil-session-id")
+	if ok {
+		t.Error("expected ok to be false for nil session value")
+	}
+	if session != nil {
+		t.Error("expected nil session for nil session value")
 	}
 }

@@ -16,12 +16,12 @@ package lookergetconnections
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	yaml "github.com/goccy/go-yaml"
+	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/sources"
-	lookersrc "github.com/googleapis/genai-toolbox/internal/sources/looker"
 	"github.com/googleapis/genai-toolbox/internal/tools"
-	"github.com/googleapis/genai-toolbox/internal/tools/looker/lookercommon"
 	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
 
@@ -29,11 +29,11 @@ import (
 	v4 "github.com/looker-open-source/sdk-codegen/go/sdk/v4"
 )
 
-const kind string = "looker-get-connections"
+const resourceType string = "looker-get-connections"
 
 func init() {
-	if !tools.Register(kind, newConfig) {
-		panic(fmt.Sprintf("tool kind %q already registered", kind))
+	if !tools.Register(resourceType, newConfig) {
+		panic(fmt.Sprintf("tool type %q already registered", resourceType))
 	}
 }
 
@@ -45,45 +45,46 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 	return actual, nil
 }
 
+type compatibleSource interface {
+	UseClientAuthorization() bool
+	GetAuthTokenHeaderName() string
+	LookerApiSettings() *rtl.ApiSettings
+	GetLookerSDK(string) (*v4.LookerSDK, error)
+}
+
 type Config struct {
-	Name         string   `yaml:"name" validate:"required"`
-	Kind         string   `yaml:"kind" validate:"required"`
-	Source       string   `yaml:"source" validate:"required"`
-	Description  string   `yaml:"description" validate:"required"`
-	AuthRequired []string `yaml:"authRequired"`
+	Name         string                 `yaml:"name" validate:"required"`
+	Type         string                 `yaml:"type" validate:"required"`
+	Source       string                 `yaml:"source" validate:"required"`
+	Description  string                 `yaml:"description" validate:"required"`
+	AuthRequired []string               `yaml:"authRequired"`
+	Annotations  *tools.ToolAnnotations `yaml:"annotations,omitempty"`
 }
 
 // validate interface
 var _ tools.ToolConfig = Config{}
 
-func (cfg Config) ToolConfigKind() string {
-	return kind
+func (cfg Config) ToolConfigType() string {
+	return resourceType
 }
 
 func (cfg Config) Initialize(srcs map[string]sources.Source) (tools.Tool, error) {
-	// verify source exists
-	rawS, ok := srcs[cfg.Source]
-	if !ok {
-		return nil, fmt.Errorf("no source named %q configured", cfg.Source)
-	}
-
-	// verify the source is compatible
-	s, ok := rawS.(*lookersrc.Source)
-	if !ok {
-		return nil, fmt.Errorf("invalid source for %q tool: source kind must be `looker`", kind)
-	}
-
 	params := parameters.Parameters{}
 
-	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params)
+	annotations := cfg.Annotations
+	if annotations == nil {
+		readOnlyHint := true
+		annotations = &tools.ToolAnnotations{
+			ReadOnlyHint: &readOnlyHint,
+		}
+	}
+
+	mcpManifest := tools.GetMcpManifest(cfg.Name, cfg.Description, cfg.AuthRequired, params, annotations)
 
 	// finish tool setup
 	return Tool{
-		Config:         cfg,
-		Parameters:     params,
-		UseClientOAuth: s.UseClientOAuth,
-		Client:         s.Client,
-		ApiSettings:    s.ApiSettings,
+		Config:     cfg,
+		Parameters: params,
 		manifest: tools.Manifest{
 			Description:  cfg.Description,
 			Parameters:   params.Manifest(),
@@ -98,31 +99,33 @@ var _ tools.Tool = Tool{}
 
 type Tool struct {
 	Config
-	UseClientOAuth bool
-	Client         *v4.LookerSDK
-	ApiSettings    *rtl.ApiSettings
-	Parameters     parameters.Parameters `yaml:"parameters"`
-	manifest       tools.Manifest
-	mcpManifest    tools.McpManifest
+	Parameters  parameters.Parameters `yaml:"parameters"`
+	manifest    tools.Manifest
+	mcpManifest tools.McpManifest
 }
 
 func (t Tool) ToConfig() tools.ToolConfig {
 	return t.Config
 }
 
-func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessToken tools.AccessToken) (any, error) {
-	logger, err := util.LoggerFromContext(ctx)
+func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, params parameters.ParamValues, accessToken tools.AccessToken) (any, util.ToolboxError) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
 	if err != nil {
-		return nil, fmt.Errorf("unable to get logger from ctx: %s", err)
+		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
 	}
 
-	sdk, err := lookercommon.GetLookerSDK(t.UseClientOAuth, t.ApiSettings, t.Client, accessToken)
+	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error getting sdk: %w", err)
+		return nil, util.NewClientServerError("unable to get logger from ctx", http.StatusInternalServerError, err)
 	}
-	resp, err := sdk.AllConnections("name, dialect(name), database, schema", t.ApiSettings)
+
+	sdk, err := source.GetLookerSDK(string(accessToken))
 	if err != nil {
-		return nil, fmt.Errorf("error making get_connections request: %s", err)
+		return nil, util.NewClientServerError("error getting sdk", http.StatusInternalServerError, err)
+	}
+	resp, err := sdk.AllConnections("name, dialect(name), database, schema", source.LookerApiSettings())
+	if err != nil {
+		return nil, util.ProcessGeneralError(err)
 	}
 
 	var data []any
@@ -136,9 +139,9 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 		if v.Schema != nil {
 			vMap["schema"] = *v.Schema
 		}
-		conn, err := sdk.ConnectionFeatures(*v.Name, "multiple_databases", t.ApiSettings)
+		conn, err := sdk.ConnectionFeatures(*v.Name, "multiple_databases", source.LookerApiSettings())
 		if err != nil {
-			return nil, fmt.Errorf("error making get_connection_features request: %s", err)
+			return nil, util.ProcessGeneralError(err)
 		}
 		vMap["supports_multiple_databases"] = *conn.MultipleDatabases
 		logger.DebugContext(ctx, "Converted to %v\n", vMap)
@@ -149,7 +152,7 @@ func (t Tool) Invoke(ctx context.Context, params parameters.ParamValues, accessT
 	return data, nil
 }
 
-func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (parameters.ParamValues, error) {
+func (t Tool) EmbedParams(ctx context.Context, paramValues parameters.ParamValues, embeddingModelsMap map[string]embeddingmodels.EmbeddingModel) (parameters.ParamValues, error) {
 	return parameters.ParamValues{}, nil
 }
 
@@ -161,10 +164,26 @@ func (t Tool) McpManifest() tools.McpManifest {
 	return t.mcpManifest
 }
 
+func (t Tool) RequiresClientAuthorization(resourceMgr tools.SourceProvider) (bool, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return false, err
+	}
+	return source.UseClientAuthorization(), nil
+}
+
 func (t Tool) Authorized(verifiedAuthServices []string) bool {
 	return tools.IsAuthorized(t.AuthRequired, verifiedAuthServices)
 }
 
-func (t Tool) RequiresClientAuthorization() bool {
-	return t.UseClientOAuth
+func (t Tool) GetAuthTokenHeaderName(resourceMgr tools.SourceProvider) (string, error) {
+	source, err := tools.GetCompatibleSource[compatibleSource](resourceMgr, t.Source, t.Name, t.Type)
+	if err != nil {
+		return "", err
+	}
+	return source.GetAuthTokenHeaderName(), nil
+}
+
+func (t Tool) GetParameters() parameters.Parameters {
+	return t.Parameters
 }

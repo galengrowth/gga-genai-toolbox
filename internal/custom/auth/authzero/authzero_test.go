@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MicahParks/keyfunc/v2"
+	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -70,7 +70,7 @@ func newService(t *testing.T, jwksJSON []byte, allowed []string) *AuthService {
 	}))
 	t.Cleanup(ts.Close)
 
-	jwks, err := keyfunc.Get(ts.URL, keyfunc.Options{})
+	kf, err := keyfunc.NewDefault([]string{ts.URL})
 	if err != nil {
 		t.Fatalf("create jwks: %v", err)
 	}
@@ -80,13 +80,13 @@ func newService(t *testing.T, jwksJSON []byte, allowed []string) *AuthService {
 	return &AuthService{
 		Config: Config{
 			Name:     "test",
-			Kind:     AuthServiceKind,
+			Type:     AuthServiceType,
 			Domain:   "tenant.example.com",
 			Audience: "https://api.example.com",
 		},
 		Domain:      "tenant.example.com",
 		Audience:    "https://api.example.com",
-		JWKS:        jwks,
+		kf:          kf,
 		allowedAlgs: allowed,
 		leeway:      30 * time.Second,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),

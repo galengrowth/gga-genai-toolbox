@@ -33,8 +33,8 @@ import (
 )
 
 var (
-	CloudSQLMySQLSourceKind = "cloud-sql-mysql"
-	CloudSQLMySQLToolKind   = "mysql-sql"
+	CloudSQLMySQLSourceType = "cloud-sql-mysql"
+	CloudSQLMySQLToolType   = "mysql-sql"
 	CloudSQLMySQLProject    = os.Getenv("CLOUD_SQL_MYSQL_PROJECT")
 	CloudSQLMySQLRegion     = os.Getenv("CLOUD_SQL_MYSQL_REGION")
 	CloudSQLMySQLInstance   = os.Getenv("CLOUD_SQL_MYSQL_INSTANCE")
@@ -60,7 +60,7 @@ func getCloudSQLMySQLVars(t *testing.T) map[string]any {
 	}
 
 	return map[string]any{
-		"kind":     CloudSQLMySQLSourceKind,
+		"type":     CloudSQLMySQLSourceType,
 		"project":  CloudSQLMySQLProject,
 		"instance": CloudSQLMySQLInstance,
 		"region":   CloudSQLMySQLRegion,
@@ -129,10 +129,10 @@ func TestCloudSQLMySQLToolEndpoints(t *testing.T) {
 	defer teardownTable2(t)
 
 	// Write config into a file and pass it to command
-	toolsFile := tests.GetToolsConfig(sourceConfig, CloudSQLMySQLToolKind, paramToolStmt, idParamToolStmt, nameParamToolStmt, arrayToolStmt, authToolStmt)
+	toolsFile := tests.GetToolsConfig(sourceConfig, CloudSQLMySQLToolType, paramToolStmt, idParamToolStmt, nameParamToolStmt, arrayToolStmt, authToolStmt)
 	toolsFile = tests.AddMySqlExecuteSqlConfig(t, toolsFile)
 	tmplSelectCombined, tmplSelectFilterCombined := tests.GetMySQLTmplToolStatement()
-	toolsFile = tests.AddTemplateParamConfig(t, toolsFile, CloudSQLMySQLToolKind, tmplSelectCombined, tmplSelectFilterCombined, "")
+	toolsFile = tests.AddTemplateParamConfig(t, toolsFile, CloudSQLMySQLToolType, tmplSelectCombined, tmplSelectFilterCombined, "")
 	toolsFile = tests.AddMySQLPrebuiltToolConfig(t, toolsFile)
 
 	cmd, cleanup, err := tests.StartCmd(ctx, toolsFile, args...)
@@ -160,8 +160,10 @@ func TestCloudSQLMySQLToolEndpoints(t *testing.T) {
 	tests.RunToolInvokeWithTemplateParameters(t, tableNameTemplateParam)
 
 	// Run specific MySQL tool tests
-	tests.RunMySQLListTablesTest(t, CloudSQLMySQLDatabase, tableNameParam, tableNameAuth)
+	const expectedOwner = "'toolbox-identity'@'%'"
+	tests.RunMySQLListTablesTest(t, CloudSQLMySQLDatabase, tableNameParam, tableNameAuth, expectedOwner)
 	tests.RunMySQLListActiveQueriesTest(t, ctx, pool)
+	tests.RunMySQLGetQueryPlanTest(t, ctx, pool, CloudSQLMySQLDatabase, tableNameParam)
 }
 
 // Test connection with different IP type
@@ -184,9 +186,110 @@ func TestCloudSQLMySQLIpConnection(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			sourceConfig["ipType"] = tc.ipType
-			err := tests.RunSourceConnectionTest(t, sourceConfig, CloudSQLMySQLToolKind)
+			err := tests.RunSourceConnectionTest(t, sourceConfig, CloudSQLMySQLToolType)
 			if err != nil {
 				t.Fatalf("Connection test failure: %s", err)
+			}
+		})
+	}
+}
+
+func TestCloudSQLMySQLIAMConnection(t *testing.T) {
+	getCloudSQLMySQLVars(t)
+	// service account email used for IAM should trim the suffix
+	serviceAccountEmail, _, _ := strings.Cut(tests.ServiceAccountEmail, "@")
+
+	noPassSourceConfig := map[string]any{
+		"type":     CloudSQLMySQLSourceType,
+		"project":  CloudSQLMySQLProject,
+		"instance": CloudSQLMySQLInstance,
+		"region":   CloudSQLMySQLRegion,
+		"database": CloudSQLMySQLDatabase,
+		"user":     serviceAccountEmail,
+	}
+	noUserSourceConfig := map[string]any{
+		"type":     CloudSQLMySQLSourceType,
+		"project":  CloudSQLMySQLProject,
+		"instance": CloudSQLMySQLInstance,
+		"region":   CloudSQLMySQLRegion,
+		"database": CloudSQLMySQLDatabase,
+		"password": "random",
+	}
+	noUserNoPassSourceConfig := map[string]any{
+		"type":     CloudSQLMySQLSourceType,
+		"project":  CloudSQLMySQLProject,
+		"instance": CloudSQLMySQLInstance,
+		"region":   CloudSQLMySQLRegion,
+		"database": CloudSQLMySQLDatabase,
+	}
+	tcs := []struct {
+		name         string
+		sourceConfig map[string]any
+		isErr        bool
+	}{
+		{
+			name:         "no user no pass",
+			sourceConfig: noUserNoPassSourceConfig,
+			isErr:        false,
+		},
+		{
+			name:         "no password",
+			sourceConfig: noPassSourceConfig,
+			isErr:        false,
+		},
+		{
+			name:         "no user",
+			sourceConfig: noUserSourceConfig,
+			isErr:        true,
+		},
+	}
+	for i, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			// Generate a UNIQUE source name for this test case.
+			// It ensures the app registers a unique driver name
+			// like "cloudsql-mysql-iam-test-0", preventing conflicts.
+			uniqueSourceName := fmt.Sprintf("iam-test-%d", i)
+
+			// Construct the tools config manually (Copied from RunSourceConnectionTest)
+			toolsFile := map[string]any{
+				"sources": map[string]any{
+					uniqueSourceName: tc.sourceConfig,
+				},
+				"tools": map[string]any{
+					"my-simple-tool": map[string]any{
+						"type":        CloudSQLMySQLToolType,
+						"source":      uniqueSourceName,
+						"description": "Simple tool to test end to end functionality.",
+						"statement":   "SELECT 1;",
+					},
+				},
+			}
+
+			// Start the Toolbox Command
+			cmd, cleanup, err := tests.StartCmd(ctx, toolsFile)
+			if err != nil {
+				t.Fatalf("command initialization returned an error: %s", err)
+			}
+			defer cleanup()
+
+			// Wait for the server to be ready
+			waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer waitCancel()
+
+			out, err := testutils.WaitForString(waitCtx, regexp.MustCompile(`Server ready to serve`), cmd.Out)
+			if err != nil {
+				if tc.isErr {
+					return
+				}
+				t.Logf("toolbox command logs: \n%s", out)
+				t.Fatalf("Connection test failure: toolbox didn't start successfully: %s", err)
+			}
+
+			if tc.isErr {
+				t.Fatalf("Expected error but test passed.")
 			}
 		})
 	}
