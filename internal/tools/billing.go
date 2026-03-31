@@ -6,6 +6,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 
@@ -71,6 +72,13 @@ func billingQueryFromParamsMap(pm map[string]any) string {
 	for _, key := range []string{"sql", "query", "statement", "cypher", "prompt"} {
 		if s, ok := paramAsString(pm[key]); ok && s != "" {
 			return s
+		}
+	}
+	// For non-SQL tools (for example list-tables), preserve request visibility by
+	// emitting the resolved invocation parameters as compact JSON.
+	if len(pm) > 0 {
+		if b, err := json.Marshal(pm); err == nil {
+			return string(b)
 		}
 	}
 	return ""
