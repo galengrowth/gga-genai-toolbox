@@ -96,3 +96,15 @@ func TestBillingQueryFromToolInvocation_configStatement(t *testing.T) {
 		t.Fatalf("got %q", q)
 	}
 }
+
+func TestBillingQueryFromToolInvocation_fallbackJSONParams(t *testing.T) {
+	t.Parallel()
+	tool := billingMockTool{}
+	pv := parameters.ParamValues{
+		{Name: "output_format", Value: "detailed"},
+		{Name: "table_names", Value: ""},
+	}
+	if q := BillingQueryFromToolInvocation(tool, pv); q != `{"output_format":"detailed","table_names":""}` {
+		t.Fatalf("got %q", q)
+	}
+}
