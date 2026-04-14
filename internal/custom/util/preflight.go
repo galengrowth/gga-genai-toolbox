@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/mcp-toolbox/internal/util"
 )
 
 // PerformPreflightCheck runs quota authorization when quotaEndpoint is configured in context.

@@ -140,6 +140,38 @@ func TestParseFromYamlCloudSQLMySQL(t *testing.T) {
 				},
 			},
 		},
+		{
+			desc: "queryTimeout and queryParams (fork parity with mysql source)",
+			in: `
+			kind: source
+			name: my-mysql-instance
+			type: cloud-sql-mysql
+			project: my-project
+			region: my-region
+			instance: my-instance
+			database: my_db
+			user: my_user
+			password: my_pass
+			queryTimeout: 30s
+			queryParams:
+			  foo: bar
+			`,
+			want: map[string]sources.SourceConfig{
+				"my-mysql-instance": cloudsqlmysql.Config{
+					Name:         "my-mysql-instance",
+					Type:         cloudsqlmysql.SourceType,
+					Project:      "my-project",
+					Region:       "my-region",
+					Instance:     "my-instance",
+					IPType:       "public",
+					Database:     "my_db",
+					User:         "my_user",
+					Password:     "my_pass",
+					QueryTimeout: "30s",
+					QueryParams:  map[string]string{"foo": "bar"},
+				},
+			},
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.desc, func(t *testing.T) {

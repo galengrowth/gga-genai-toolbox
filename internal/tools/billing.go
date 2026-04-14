@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/googleapis/genai-toolbox/internal/util/parameters"
+	"github.com/googleapis/mcp-toolbox/internal/util/parameters"
 )
 
 // maxBillingQueryLen limits the query string sent on billing POSTs (UTF-8 byte length).

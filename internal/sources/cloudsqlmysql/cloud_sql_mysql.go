@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"time"
 
 	"cloud.google.com/go/cloudsqlconn/mysql/mysql"
 	"github.com/goccy/go-yaml"
@@ -59,6 +60,9 @@ type Config struct {
 	User     string         `yaml:"user"`
 	Password string         `yaml:"password"`
 	Database string         `yaml:"database"`
+	// Fork: parity with internal/sources/mysql — readTimeout + extra DSN params for go-sql-driver/mysql over Cloud SQL connector.
+	QueryTimeout string            `yaml:"queryTimeout"`
+	QueryParams  map[string]string `yaml:"queryParams"`
 }
 
 func (r Config) SourceConfigType() string {
@@ -66,7 +70,7 @@ func (r Config) SourceConfigType() string {
 }
 
 func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.Source, error) {
-	pool, err := initCloudSQLMySQLConnectionPool(ctx, tracer, r.Name, r.Project, r.Region, r.Instance, r.IPType.String(), r.User, r.Password, r.Database)
+	pool, err := initCloudSQLMySQLConnectionPool(ctx, tracer, r.Name, r.Project, r.Region, r.Instance, r.IPType.String(), r.User, r.Password, r.Database, r.QueryTimeout, r.QueryParams)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create pool: %w", err)
 	}
@@ -191,7 +195,7 @@ func getConnectionConfig(ctx context.Context, user, pass string) (string, string
 	return user, pass, useIAM, nil
 }
 
-func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, project, region, instance, ipType, user, pass, dbname string) (*sql.DB, error) {
+func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, name, project, region, instance, ipType, user, pass, dbname, queryTimeout string, queryParams map[string]string) (*sql.DB, error) {
 	//nolint:all // Reassigned ctx
 	ctx, span := sources.InitConnectionSpan(ctx, tracer, SourceType, name)
 	defer span.End()
@@ -221,30 +225,15 @@ func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, n
 		}
 	}
 
-	var dsn string
-	// Tell the driver to use the Cloud SQL Go Connector to create connections
-	if useIAM {
-		dsn = fmt.Sprintf("%s@%s(%s:%s:%s)/%s?connectionAttributes=program_name:%s",
-			user,
-			driverName,
-			project,
-			region,
-			instance,
-			dbname,
-			url.QueryEscape(userAgent),
-		)
-	} else {
-		dsn = fmt.Sprintf("%s:%s@%s(%s:%s:%s)/%s?connectionAttributes=program_name:%s",
-			user,
-			pass,
-			driverName,
-			project,
-			region,
-			instance,
-			dbname,
-			url.QueryEscape(userAgent),
-		)
+	pathPrefix, err := cloudSQLMySQLDSNPathPrefix(useIAM, user, pass, driverName, project, region, instance, dbname)
+	if err != nil {
+		return nil, err
 	}
+	query, err := cloudSQLMySQLDSNQuery(userAgent, queryTimeout, queryParams)
+	if err != nil {
+		return nil, err
+	}
+	dsn := pathPrefix + "?" + query
 
 	db, err := sql.Open(
 		driverName,
@@ -254,4 +243,33 @@ func initCloudSQLMySQLConnectionPool(ctx context.Context, tracer trace.Tracer, n
 		return nil, err
 	}
 	return db, nil
+}
+
+// cloudSQLMySQLDSNPathPrefix returns the DSN path before the query string (user@driver(project:region:instance)/db).
+func cloudSQLMySQLDSNPathPrefix(useIAM bool, user, pass, driverName, project, region, instance, dbname string) (string, error) {
+	if useIAM {
+		return fmt.Sprintf("%s@%s(%s:%s:%s)/%s", user, driverName, project, region, instance, dbname), nil
+	}
+	return fmt.Sprintf("%s:%s@%s(%s:%s:%s)/%s", user, pass, driverName, project, region, instance, dbname), nil
+}
+
+// cloudSQLMySQLDSNQuery builds the go-sql-driver/mysql query segment, matching internal/sources/mysql semantics:
+// default parseTime=true, merge queryParams (skip empty), then set readTimeout from queryTimeout (same validation as mysql source).
+func cloudSQLMySQLDSNQuery(userAgent, queryTimeout string, queryParams map[string]string) (string, error) {
+	v := url.Values{}
+	v.Set("connectionAttributes", fmt.Sprintf("program_name:%s", userAgent))
+	v.Set("parseTime", "true")
+	for k, val := range queryParams {
+		if val == "" {
+			continue
+		}
+		v.Set(k, val)
+	}
+	if queryTimeout != "" {
+		if _, err := time.ParseDuration(queryTimeout); err != nil {
+			return "", fmt.Errorf("invalid queryTimeout %q: %w", queryTimeout, err)
+		}
+		v.Set("readTimeout", queryTimeout)
+	}
+	return v.Encode(), nil
 }
