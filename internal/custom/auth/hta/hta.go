@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/googleapis/genai-toolbox/internal/auth"
+	"github.com/googleapis/mcp-toolbox/internal/auth"
 )
 
 // AuthServiceType is the YAML `type` value for this auth service.

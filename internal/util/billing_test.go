@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	ilog "github.com/googleapis/genai-toolbox/internal/log"
+	ilog "github.com/googleapis/mcp-toolbox/internal/log"
 )
 
 // noopLogger implements log.Logger for testing without output

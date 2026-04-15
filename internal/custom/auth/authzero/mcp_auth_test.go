@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/googleapis/genai-toolbox/internal/auth/generic"
+	"github.com/googleapis/mcp-toolbox/internal/auth/generic"
 )
 
 func TestValidateMCPAuth_MissingToken(t *testing.T) {

@@ -22,17 +22,17 @@ import (
 	"strings"
 
 	yaml "github.com/goccy/go-yaml"
-	"github.com/googleapis/genai-toolbox/internal/auth"
-	"github.com/googleapis/genai-toolbox/internal/auth/generic"
-	"github.com/googleapis/genai-toolbox/internal/auth/google"
-	"github.com/googleapis/genai-toolbox/internal/custom/auth/authzero"
-	"github.com/googleapis/genai-toolbox/internal/custom/auth/hta"
-	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
-	"github.com/googleapis/genai-toolbox/internal/embeddingmodels/gemini"
-	"github.com/googleapis/genai-toolbox/internal/prompts"
-	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/tools"
-	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/googleapis/mcp-toolbox/internal/auth"
+	"github.com/googleapis/mcp-toolbox/internal/auth/generic"
+	"github.com/googleapis/mcp-toolbox/internal/auth/google"
+	"github.com/googleapis/mcp-toolbox/internal/custom/auth/authzero"
+	"github.com/googleapis/mcp-toolbox/internal/custom/auth/hta"
+	"github.com/googleapis/mcp-toolbox/internal/embeddingmodels"
+	"github.com/googleapis/mcp-toolbox/internal/embeddingmodels/gemini"
+	"github.com/googleapis/mcp-toolbox/internal/prompts"
+	"github.com/googleapis/mcp-toolbox/internal/sources"
+	"github.com/googleapis/mcp-toolbox/internal/tools"
+	"github.com/googleapis/mcp-toolbox/internal/util"
 )
 
 type ServerConfig struct {
