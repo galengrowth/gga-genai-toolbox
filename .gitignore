@@ -27,3 +27,5 @@ mcp-toolbox
 toolbox
 toolbox.exe
 **/test.db
+
+graphify-out/

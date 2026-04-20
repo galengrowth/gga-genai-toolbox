@@ -27,37 +27,58 @@ type billingBlockEntry struct {
 
 var billingInsufficientBlocks sync.Map // key: caller key, value: billingBlockEntry
 
-func billingCallerKey(ctx context.Context) string {
-	sub, email := UserInfoFromContext(ctx)
+// billingBlockKeyFromParts builds the same caller key used by billingCallerKey, without a context.
+// authHeader is the raw Authorization header value (optional); when sub/email are empty it is hashed
+// for a stable key (same scheme as billingCallerKey).
+func billingBlockKeyFromParts(sub, email, authHeader string) string {
 	if sub != "" {
 		return "sub:" + sub
 	}
 	if email != "" {
 		return "email:" + email
 	}
-	if auth := AuthorizationHeaderFromContext(ctx); auth != "" {
-		sum := sha256.Sum256([]byte(auth))
+	if authHeader != "" {
+		sum := sha256.Sum256([]byte(authHeader))
 		return "auth:" + hex.EncodeToString(sum[:16])
 	}
 	return ""
 }
 
-// SetBillingInsufficientTokensBlock records that the billing usage POST reported insufficient tokens.
-func SetBillingInsufficientTokensBlock(ctx context.Context) {
-	k := billingCallerKey(ctx)
+func billingCallerKey(ctx context.Context) string {
+	sub, email := UserInfoFromContext(ctx)
+	return billingBlockKeyFromParts(sub, email, AuthorizationHeaderFromContext(ctx))
+}
+
+// SetBillingInsufficientTokensBlockForParts records an insufficient-token block for the same identity
+// fields sent on the billing POST (sub, email, optional raw Authorization). Used from the async billing
+// goroutine so the block key matches the request even after the original context is no longer valid.
+func SetBillingInsufficientTokensBlockForParts(sub, email, authHeader string) {
+	k := billingBlockKeyFromParts(sub, email, authHeader)
 	if k == "" {
 		return
 	}
 	billingInsufficientBlocks.Store(k, billingBlockEntry{until: time.Now().Add(billingInsufficientBlockTTL)})
 }
 
-// ClearBillingInsufficientTokensBlock removes the block after a successful billing POST (2xx).
-func ClearBillingInsufficientTokensBlock(ctx context.Context) {
-	k := billingCallerKey(ctx)
+// ClearBillingInsufficientTokensBlockForParts removes the block for the given identity parts.
+func ClearBillingInsufficientTokensBlockForParts(sub, email, authHeader string) {
+	k := billingBlockKeyFromParts(sub, email, authHeader)
 	if k == "" {
 		return
 	}
 	billingInsufficientBlocks.Delete(k)
+}
+
+// SetBillingInsufficientTokensBlock records that the billing usage POST reported insufficient tokens.
+func SetBillingInsufficientTokensBlock(ctx context.Context) {
+	sub, email := UserInfoFromContext(ctx)
+	SetBillingInsufficientTokensBlockForParts(sub, email, AuthorizationHeaderFromContext(ctx))
+}
+
+// ClearBillingInsufficientTokensBlock removes the block after a successful billing POST (2xx).
+func ClearBillingInsufficientTokensBlock(ctx context.Context) {
+	sub, email := UserInfoFromContext(ctx)
+	ClearBillingInsufficientTokensBlockForParts(sub, email, AuthorizationHeaderFromContext(ctx))
 }
 
 // BillingInsufficientTokensBlocked is true if a prior billing POST denied usage for this caller.

@@ -23,7 +23,14 @@ Merge-friendly practice: keep **business logic** in `internal/custom/**` and **t
 
 ## `custom:` keys in `tools.yaml` (or equivalent)
 
-Server config may include a **`custom`** map (YAML `custom:`) for settings **outside** the upstream core schema. Values are read in `internal/server/server.go` and related modules.
+Server config may include fork settings **outside** the upstream core schema. Values are read in `internal/server/server.go` and related modules. You can express them in either form (multiple YAML documents are shallow-merged):
+
+- **Nested (classic):** a top-level `custom:` map.
+- **Flat (v2-style):** its own document with `kind: custom` and the **same keys as top-level siblings** (no `custom:` wrapper), consistent with `kind: source` / `kind: tool` / etc.
+
+Parsing is implemented in `cmd/internal/config.go` (`extractCustomFromYAML`). Resource unmarshalling in `internal/server/config.go` **skips** `kind: custom` documents (they have no `name`); fork settings are merged only via `extractCustomFromYAML` before `UnmarshalResourceConfig` runs.
+
+**If billing/quota HTTP stops after you comment URLs out but you still see outbound traffic:** (1) On startup, check logs for `billing: billingEndpoint not set` and `quota: quotaEndpoint not set` — if you instead see “set”, another merged file or an uncommented key still supplies the URL. (2) **`oauthClaudeAuthProxy`** performs OIDC discovery to your Auth0 tenant at startup (`/.well-known/openid-configuration`); that is **not** billing/quota. (3) Merging multiple YAML files **does not remove** keys omitted from a later file; an earlier file’s `billingEndpoint` would still apply unless you override or stop loading that file.
 
 ### Billing
 
@@ -44,7 +51,7 @@ The billing POST is built in **`internal/util/billing.go`** (`BillingInfo`). The
 
 Strings are capped at **64KiB** UTF-8 bytes (`maxBillingQueryLen`).
 
-**Impact:** Billing is **asynchronous** (goroutine). A billing failure **does not** roll back the tool result the client already received. If the billing API returns **insufficient tokens** (e.g. HTTP 400 with a matching body), the fork may **block further tool calls** for that caller until a **successful** billing response or a **time-based block expiry** (see `internal/util/billing_tokens_block.go`).
+**Impact:** Billing is **asynchronous** (goroutine). A billing failure **does not** roll back the tool result the client already received. If the billing API returns **insufficient tokens** (e.g. HTTP 400 with a matching body), the fork may **block further tool calls** for that caller until a **successful** billing response or a **time-based block expiry** (see `internal/util/billing_tokens_block.go`). When **`quotaEndpoint`** is configured, **quota/authorize runs first**; if authorize returns **`allowed: true`**, the toolbox **clears** that in-process block so your billing API’s DB-backed authorize path can recover **without restarting MCP**.
 
 ---
 
@@ -57,7 +64,7 @@ Strings are capped at **64KiB** UTF-8 bytes (`maxBillingQueryLen`).
 
 **Expected response:** JSON with **`allowed`** (bool). HTTP **2xx** and **429** / **403** bodies are parsed when possible; **400** is treated as a denial path when the body indicates failure. Empty or malformed bodies are handled conservatively (see `internal/util/quota.go`).
 
-**Impact:** If the quota service denies **or** returns an unexpected error, the **current** tool call **fails** (REST/MCP error) and **no** tool execution runs. This is **synchronous** and blocks the request.
+**Impact:** If the quota service denies **or** returns an unexpected error, the **current** tool call **fails** (REST/MCP error) and **no** tool execution runs. This is **synchronous** and blocks the request. A successful **`allowed: true`** response also **clears** a stale billing insufficient-token block (see Billing impact above).
 
 ---
 

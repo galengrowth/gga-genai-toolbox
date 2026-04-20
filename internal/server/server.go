@@ -355,7 +355,9 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 
 	if cfg.Custom != nil {
 		be, hasBE := cfg.Custom["billingEndpoint"].(string)
+		be = strings.TrimSpace(be)
 		qe, hasQE := cfg.Custom["quotaEndpoint"].(string)
+		qe = strings.TrimSpace(qe)
 		var reqBill, hasReqBill bool
 		if v, exists := cfg.Custom["requireBillingPost"]; exists {
 			hasReqBill = true
@@ -388,9 +390,13 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		}
 		if hasBE && be != "" {
 			l.InfoContext(ctx, "billing: billingEndpoint set — usage POSTs run after successful tool calls (stricter billing failure logs when requireBillingPost is true)")
+		} else {
+			l.InfoContext(ctx, "billing: billingEndpoint not set — post-invocation billing HTTP calls are disabled")
 		}
 		if hasQE && qe != "" {
 			l.InfoContext(ctx, "quota: quotaEndpoint set — authorize preflight runs before each tool invocation")
+		} else {
+			l.InfoContext(ctx, "quota: quotaEndpoint not set — authorize preflight HTTP calls are disabled")
 		}
 
 		debugLogAuthToken := false
@@ -423,8 +429,8 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				reqCtx := r.Context()
-				if billingEndpoint, ok := cfg.Custom["billingEndpoint"].(string); ok && billingEndpoint != "" {
-					reqCtx = util.WithBillingEndpoint(reqCtx, billingEndpoint)
+				if billingEndpoint, ok := cfg.Custom["billingEndpoint"].(string); ok && strings.TrimSpace(billingEndpoint) != "" {
+					reqCtx = util.WithBillingEndpoint(reqCtx, strings.TrimSpace(billingEndpoint))
 				}
 				if requireBillingVal, exists := cfg.Custom["requireBillingPost"]; exists {
 					var requireBilling bool
@@ -440,8 +446,8 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 						reqCtx = util.WithBillingEnforcement(reqCtx, requireBilling)
 					}
 				}
-				if quotaEndpoint, ok := cfg.Custom["quotaEndpoint"].(string); ok && quotaEndpoint != "" {
-					reqCtx = util.WithQuotaEndpoint(reqCtx, quotaEndpoint)
+				if quotaEndpoint, ok := cfg.Custom["quotaEndpoint"].(string); ok && strings.TrimSpace(quotaEndpoint) != "" {
+					reqCtx = util.WithQuotaEndpoint(reqCtx, strings.TrimSpace(quotaEndpoint))
 				}
 				if requireQuotaVal, exists := cfg.Custom["requireQuotaPreflight"]; exists {
 					var requireQuota bool

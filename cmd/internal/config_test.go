@@ -36,6 +36,67 @@ import (
 	"github.com/googleapis/mcp-toolbox/internal/util/parameters"
 )
 
+func TestExtractCustomFromYAML(t *testing.T) {
+	tcs := []struct {
+		desc string
+		raw  string
+		want map[string]any
+	}{
+		{
+			desc: "nested custom map",
+			raw: `custom:
+  billingEndpoint: https://a.example
+`,
+			want: map[string]any{"billingEndpoint": "https://a.example"},
+		},
+		{
+			desc: "flat kind custom",
+			raw: `kind: custom
+billingEndpoint: https://b.example
+oauthClaudeAuthProxy: true
+`,
+			want: map[string]any{
+				"billingEndpoint":      "https://b.example",
+				"oauthClaudeAuthProxy": true,
+			},
+		},
+		{
+			desc: "later document overrides duplicate key",
+			raw: `kind: custom
+billingEndpoint: https://first.example
+---
+custom:
+  billingEndpoint: https://second.example
+`,
+			want: map[string]any{"billingEndpoint": "https://second.example"},
+		},
+		{
+			desc: "commented billing and quota lines do not appear as keys",
+			raw: `kind: custom
+#billingEndpoint: "https://mcp-api-dev.example.com/api/Billing"
+requireBillingPost: false
+#quotaEndpoint: "https://mcp-api-dev.example.com/api/Billing/authorize"
+oauthClaudeAuthProxy: true
+`,
+			want: map[string]any{
+				"requireBillingPost":   false,
+				"oauthClaudeAuthProxy": true,
+			},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := extractCustomFromYAML([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("extractCustomFromYAML: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Fatalf("(-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestParseEnv(t *testing.T) {
 	tcs := []struct {
 		desc         string
