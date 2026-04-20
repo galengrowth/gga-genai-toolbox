@@ -42,6 +42,15 @@ This README provides a brief overview. For comprehensive details, see the [full 
 > [!TIP]
 > **Fork maintainers:** custom billing, quota, OAuth PRM, Auth0 MCP integration, and related YAML keys are documented in **[FORK.md](./FORK.md)** (not part of upstream Google docs).
 
+### Fork-specific `custom:` flags
+
+These keys apply only to this fork’s extended `custom:` block (see **[FORK.md](./FORK.md)**). You may use either a nested `custom:` map or a flat document with **`kind: custom`** and the same keys as siblings (aligned with v2 flat resources). **`requireBillingPost`** and **`requireQuotaPreflight`** are optional.
+
+| Key | Role |
+|-----|------|
+| **`requireBillingPost`** | Does **not** enable or disable billing POSTs. When **`billingEndpoint`** is set, usage POSTs still run. If this flag is **`true`**, failures from the billing HTTP call are logged at **error** severity; if omitted or **`false`**, those same failures are logged at **warn**. |
+| **`requireQuotaPreflight`** | **Legacy / compatibility.** Quota preflight runs whenever **`quotaEndpoint`** is set; this flag does **not** turn preflight on or off. It is safe to omit or set to **`false`**. |
+
 <!-- TOC ignore:true -->
 ## Table of Contents
 
@@ -56,6 +65,7 @@ This README provides a brief overview. For comprehensive details, see the [full 
 - [Versioning](#versioning)
 - [Contributing](#contributing)
 - [Community](#community)
+- [Fork-specific `custom:` flags](#fork-specific-custom-flags)
 
 ---
 

@@ -98,7 +98,10 @@ func (p *ConfigParser) parseEnv(input string) (string, error) {
 	return output, err
 }
 
-// extractCustomFromYAML collects `custom:` maps from all YAML documents (shallow-merge).
+// extractCustomFromYAML collects fork `custom` settings from all YAML documents (shallow-merge).
+// Supported shapes per document:
+//   - Nested: custom: { key: value, ... }
+//   - Flat (v2): kind: custom plus the same keys as siblings (excluding kind).
 func extractCustomFromYAML(raw []byte) (map[string]any, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	merged := make(map[string]any)
@@ -110,12 +113,18 @@ func extractCustomFromYAML(raw []byte) (map[string]any, error) {
 			}
 			return nil, err
 		}
-		c, ok := top["custom"].(map[string]any)
-		if !ok || c == nil {
-			continue
+		if c, ok := top["custom"].(map[string]any); ok && c != nil {
+			for k, v := range c {
+				merged[k] = v
+			}
 		}
-		for k, v := range c {
-			merged[k] = v
+		if k, ok := top["kind"].(string); ok && strings.EqualFold(strings.TrimSpace(k), "custom") {
+			for key, v := range top {
+				if strings.EqualFold(key, "kind") {
+					continue
+				}
+				merged[key] = v
+			}
 		}
 	}
 	if len(merged) == 0 {

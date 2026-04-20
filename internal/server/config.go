@@ -175,6 +175,10 @@ func UnmarshalResourceConfig(ctx context.Context, raw []byte) (SourceConfigs, Au
 		if kind, ok = resource["kind"].(string); !ok {
 			return nil, nil, nil, nil, nil, nil, fmt.Errorf("missing 'kind' field or it is not a string: %v", resource)
 		}
+		// Fork: flat custom settings (parsed into ServerConfig.Custom in cmd/internal); not a core resource.
+		if strings.EqualFold(strings.TrimSpace(kind), "custom") {
+			continue
+		}
 		if name, ok = resource["name"].(string); !ok {
 			return nil, nil, nil, nil, nil, nil, fmt.Errorf("missing 'name' field or it is not a string")
 		}
