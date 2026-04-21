@@ -84,8 +84,9 @@ func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query str
 	// Avoid tying this to the parent request context (which may be canceled immediately).
 	logger, _ := LoggerFromContext(ctx)
 	userAgent, _ := UserAgentFromContext(ctx)
+	authHdr := AuthorizationHeaderFromContext(ctx)
 
-	go func(bURL, reqID string, payload BillingInfo) {
+	go func(bURL, reqID string, payload BillingInfo, authHeader string) {
 		// Marshal outside of request creation and log failures.
 		data, err := json.Marshal(payload)
 		if err != nil {
@@ -114,8 +115,8 @@ func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query str
 		if userAgent != "" {
 			req.Header.Set("User-Agent", userAgent)
 		}
-		if auth := AuthorizationHeaderFromContext(ctx); auth != "" {
-			req.Header.Set("Authorization", auth)
+		if authHeader != "" {
+			req.Header.Set("Authorization", authHeader)
 		}
 
 		// Optional debug: log a curl-equivalent command to reproduce the request
@@ -135,10 +136,10 @@ func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query str
 			if userAgent != "" {
 				parts = append(parts, "-H", "'User-Agent: "+esc(userAgent)+"'")
 			}
-			if auth := AuthorizationHeaderFromContext(ctx); auth != "" {
+			if authHeader != "" {
 				// Redact token for logs while preserving scheme (e.g., Bearer)
-				redacted := auth
-				if sp := strings.SplitN(auth, " ", 2); len(sp) == 2 {
+				redacted := authHeader
+				if sp := strings.SplitN(authHeader, " ", 2); len(sp) == 2 {
 					scheme := sp[0]
 					tok := sp[1]
 					if len(tok) > 16 {
@@ -176,7 +177,7 @@ func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query str
 		snippet := string(body)
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			ClearBillingInsufficientTokensBlock(ctx)
+			ClearBillingInsufficientTokensBlockForParts(payload.UserSub, payload.UserEmail, authHeader)
 			return
 		}
 		if logger != nil {
@@ -190,9 +191,9 @@ func LogAndPostBilling(ctx context.Context, tool string, rowCount int, query str
 			}
 		}
 		if billingResponseIndicatesInsufficientTokens(resp.StatusCode, snippet) {
-			SetBillingInsufficientTokensBlock(ctx)
+			SetBillingInsufficientTokensBlockForParts(payload.UserSub, payload.UserEmail, authHeader)
 		}
-	}(billingURL, reqID, bi)
+	}(billingURL, reqID, bi, authHdr)
 }
 
 // PostBillingSync performs a synchronous billing POST and returns error on failure.

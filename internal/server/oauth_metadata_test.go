@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/googleapis/genai-toolbox/internal/auth"
+	"github.com/googleapis/mcp-toolbox/internal/auth"
 )
 
 func TestParseOAuthProtectedResourceMetadata_Disabled(t *testing.T) {

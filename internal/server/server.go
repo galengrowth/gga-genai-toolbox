@@ -32,17 +32,18 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/go-chi/httplog/v3"
-	"github.com/googleapis/genai-toolbox/internal/auth"
-	"github.com/googleapis/genai-toolbox/internal/auth/generic"
-	"github.com/googleapis/genai-toolbox/internal/custom/auth/authzero"
-	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
-	"github.com/googleapis/genai-toolbox/internal/log"
-	"github.com/googleapis/genai-toolbox/internal/prompts"
-	"github.com/googleapis/genai-toolbox/internal/server/resources"
-	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/telemetry"
-	"github.com/googleapis/genai-toolbox/internal/tools"
-	"github.com/googleapis/genai-toolbox/internal/util"
+	"github.com/go-chi/render"
+	"github.com/googleapis/mcp-toolbox/internal/auth"
+	"github.com/googleapis/mcp-toolbox/internal/auth/generic"
+	"github.com/googleapis/mcp-toolbox/internal/custom/auth/authzero"
+	"github.com/googleapis/mcp-toolbox/internal/embeddingmodels"
+	"github.com/googleapis/mcp-toolbox/internal/log"
+	"github.com/googleapis/mcp-toolbox/internal/prompts"
+	"github.com/googleapis/mcp-toolbox/internal/server/resources"
+	"github.com/googleapis/mcp-toolbox/internal/sources"
+	"github.com/googleapis/mcp-toolbox/internal/telemetry"
+	"github.com/googleapis/mcp-toolbox/internal/tools"
+	"github.com/googleapis/mcp-toolbox/internal/util"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -354,7 +355,9 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 
 	if cfg.Custom != nil {
 		be, hasBE := cfg.Custom["billingEndpoint"].(string)
+		be = strings.TrimSpace(be)
 		qe, hasQE := cfg.Custom["quotaEndpoint"].(string)
+		qe = strings.TrimSpace(qe)
 		var reqBill, hasReqBill bool
 		if v, exists := cfg.Custom["requireBillingPost"]; exists {
 			hasReqBill = true
@@ -387,9 +390,13 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		}
 		if hasBE && be != "" {
 			l.InfoContext(ctx, "billing: billingEndpoint set — usage POSTs run after successful tool calls (stricter billing failure logs when requireBillingPost is true)")
+		} else {
+			l.InfoContext(ctx, "billing: billingEndpoint not set — post-invocation billing HTTP calls are disabled")
 		}
 		if hasQE && qe != "" {
 			l.InfoContext(ctx, "quota: quotaEndpoint set — authorize preflight runs before each tool invocation")
+		} else {
+			l.InfoContext(ctx, "quota: quotaEndpoint not set — authorize preflight HTTP calls are disabled")
 		}
 
 		debugLogAuthToken := false
@@ -422,8 +429,8 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				reqCtx := r.Context()
-				if billingEndpoint, ok := cfg.Custom["billingEndpoint"].(string); ok && billingEndpoint != "" {
-					reqCtx = util.WithBillingEndpoint(reqCtx, billingEndpoint)
+				if billingEndpoint, ok := cfg.Custom["billingEndpoint"].(string); ok && strings.TrimSpace(billingEndpoint) != "" {
+					reqCtx = util.WithBillingEndpoint(reqCtx, strings.TrimSpace(billingEndpoint))
 				}
 				if requireBillingVal, exists := cfg.Custom["requireBillingPost"]; exists {
 					var requireBilling bool
@@ -439,8 +446,8 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 						reqCtx = util.WithBillingEnforcement(reqCtx, requireBilling)
 					}
 				}
-				if quotaEndpoint, ok := cfg.Custom["quotaEndpoint"].(string); ok && quotaEndpoint != "" {
-					reqCtx = util.WithQuotaEndpoint(reqCtx, quotaEndpoint)
+				if quotaEndpoint, ok := cfg.Custom["quotaEndpoint"].(string); ok && strings.TrimSpace(quotaEndpoint) != "" {
+					reqCtx = util.WithQuotaEndpoint(reqCtx, strings.TrimSpace(quotaEndpoint))
 				}
 				if requireQuotaVal, exists := cfg.Custom["requireQuotaPreflight"]; exists {
 					var requireQuota bool
@@ -612,6 +619,11 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 			return nil, err
 		}
 		r.Mount("/api", apiR)
+	} else {
+		r.Handle("/api/*", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			err := errors.New("/api native endpoints are disabled by default. Please use the standard /mcp JSON-RPC endpoint")
+			_ = render.Render(w, r, newErrResponse(err, http.StatusGone))
+		}))
 	}
 	if cfg.UI {
 		webR, err := webRouter()
