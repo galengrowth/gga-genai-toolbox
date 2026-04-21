@@ -9,7 +9,7 @@ import (
 	"context"
 	"net/http"
 
-	baseutil "github.com/googleapis/genai-toolbox/internal/util"
+	baseutil "github.com/googleapis/mcp-toolbox/internal/util"
 )
 
 // EnrichContextWithAuthForBillingQuota attaches Authorization and JWT claims to ctx so

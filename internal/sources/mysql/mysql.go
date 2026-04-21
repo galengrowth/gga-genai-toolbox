@@ -23,11 +23,11 @@ import (
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/goccy/go-yaml"
 	// Fork: SQL guardrails live in internal/custom/util; validating here keeps diffs out of every mysql tool file.
-	customutil "github.com/googleapis/genai-toolbox/internal/custom/util"
-	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/tools/mysql/mysqlcommon"
-	"github.com/googleapis/genai-toolbox/internal/util"
-	"github.com/googleapis/genai-toolbox/internal/util/orderedmap"
+	customutil "github.com/googleapis/mcp-toolbox/internal/custom/util"
+	"github.com/googleapis/mcp-toolbox/internal/sources"
+	"github.com/googleapis/mcp-toolbox/internal/tools/mysql/mysqlcommon"
+	"github.com/googleapis/mcp-toolbox/internal/util"
+	"github.com/googleapis/mcp-toolbox/internal/util/orderedmap"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -106,6 +106,10 @@ func (s *Source) ToConfig() sources.SourceConfig {
 
 func (s *Source) MySQLPool() *sql.DB {
 	return s.Pool
+}
+
+func (s *Source) MySQLDatabase() string {
+	return s.Database
 }
 
 func (s *Source) RunSQL(ctx context.Context, statement string, params []any) (any, error) {

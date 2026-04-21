@@ -20,8 +20,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/googleapis/genai-toolbox/internal/auth"
-	"github.com/googleapis/genai-toolbox/internal/custom/auth/authzero"
+	"github.com/googleapis/mcp-toolbox/internal/auth"
+	"github.com/googleapis/mcp-toolbox/internal/custom/auth/authzero"
 )
 
 // oauthProtectedResourceConfig holds RFC 9728 OAuth 2.0 Protected Resource Metadata

@@ -19,10 +19,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/googleapis/genai-toolbox/internal/server"
-	"github.com/googleapis/genai-toolbox/internal/sources"
-	"github.com/googleapis/genai-toolbox/internal/sources/cloudsqlmysql"
-	"github.com/googleapis/genai-toolbox/internal/testutils"
+	"github.com/googleapis/mcp-toolbox/internal/server"
+	"github.com/googleapis/mcp-toolbox/internal/sources"
+	"github.com/googleapis/mcp-toolbox/internal/sources/cloudsqlmysql"
+	"github.com/googleapis/mcp-toolbox/internal/testutils"
 )
 
 func TestParseFromYamlCloudSQLMySQL(t *testing.T) {
@@ -137,6 +137,38 @@ func TestParseFromYamlCloudSQLMySQL(t *testing.T) {
 					Database: "my_db",
 					User:     "my_user",
 					Password: "my_pass",
+				},
+			},
+		},
+		{
+			desc: "queryTimeout and queryParams (fork parity with mysql source)",
+			in: `
+			kind: source
+			name: my-mysql-instance
+			type: cloud-sql-mysql
+			project: my-project
+			region: my-region
+			instance: my-instance
+			database: my_db
+			user: my_user
+			password: my_pass
+			queryTimeout: 30s
+			queryParams:
+			  foo: bar
+			`,
+			want: map[string]sources.SourceConfig{
+				"my-mysql-instance": cloudsqlmysql.Config{
+					Name:         "my-mysql-instance",
+					Type:         cloudsqlmysql.SourceType,
+					Project:      "my-project",
+					Region:       "my-region",
+					Instance:     "my-instance",
+					IPType:       "public",
+					Database:     "my_db",
+					User:         "my_user",
+					Password:     "my_pass",
+					QueryTimeout: "30s",
+					QueryParams:  map[string]string{"foo": "bar"},
 				},
 			},
 		},

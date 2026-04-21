@@ -23,5 +23,9 @@ node_modules
 __pycache__/
 
 # executable
-genai-toolbox
+mcp-toolbox
 toolbox
+toolbox.exe
+**/test.db
+
+graphify-out/

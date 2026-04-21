@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/googleapis/genai-toolbox/internal/auth/generic"
+	"github.com/googleapis/mcp-toolbox/internal/auth/generic"
 )
 
 // ValidateMCPAuth enforces Bearer JWT validation for MCP HTTP requests (/mcp).

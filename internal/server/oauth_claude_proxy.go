@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/googleapis/genai-toolbox/internal/auth"
-	"github.com/googleapis/genai-toolbox/internal/custom/auth/authzero"
+	"github.com/googleapis/mcp-toolbox/internal/auth"
+	"github.com/googleapis/mcp-toolbox/internal/custom/auth/authzero"
 )
 
 // claudeOAuthProxy forwards browser / backend OAuth requests to the configured IdP.
