@@ -85,7 +85,7 @@ func newService(t *testing.T, jwksJSON []byte, allowed []string) *AuthService {
 			Audience: "https://api.example.com",
 		},
 		Domain:      "tenant.example.com",
-		Audience:    "https://api.example.com",
+		Audiences:   []string{"https://api.example.com"},
 		kf:          kf,
 		allowedAlgs: allowed,
 		leeway:      30 * time.Second,
@@ -161,6 +161,26 @@ func TestAuthZero_AudienceMismatch(t *testing.T) {
 	_, err := svc.GetClaimsFromHeader(context.Background(), hdr)
 	if !errors.Is(err, ErrAudienceMismatch) {
 		t.Fatalf("expected ErrAudienceMismatch got %v", err)
+	}
+}
+
+func TestAuthZero_AdditionalAudienceAccepted(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	svc := newService(t, buildJWKS(&priv.PublicKey, "kid"), nil)
+	svc.Audiences = []string{"https://api.example.com", "https://dev.healthtechalpha.com"}
+
+	claims := jwt.MapClaims{
+		"iss": "https://tenant.example.com/",
+		"aud": "https://dev.healthtechalpha.com",
+		"sub": "user-123",
+		"exp": time.Now().Add(5 * time.Minute).Unix(),
+		"iat": time.Now().Unix(),
+	}
+	tok := signToken(t, priv, "kid", "RS256", claims)
+	hdr := http.Header{"Authorization": []string{"Bearer " + tok}}
+	_, err := svc.GetClaimsFromHeader(context.Background(), hdr)
+	if err != nil {
+		t.Fatalf("expected additional audience to be accepted, got %v", err)
 	}
 }
 

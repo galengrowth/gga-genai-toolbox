@@ -61,7 +61,7 @@ func (a *AuthService) ValidateMCPAuth(ctx context.Context, h http.Header) error 
 	}
 	isAudValid := false
 	for _, audItem := range aud {
-		if audItem == a.Audience {
+		if a.isAllowedAudience(audItem) {
 			isAudValid = true
 			break
 		}
