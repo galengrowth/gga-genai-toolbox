@@ -72,13 +72,36 @@ func TestValidateMCPAuth_InsufficientScope(t *testing.T) {
 	}
 }
 
+func TestValidateMCPAuth_AdditionalAudienceAccepted(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	svc := newService(t, buildJWKS(&priv.PublicKey, "kid1"), []string{"RS256"})
+	svc.Audiences = []string{"https://api.example.com", "https://dev.healthtechalpha.com"}
+	svc.ScopesRequired = []string{"openid"}
+
+	claims := jwt.MapClaims{
+		"iss":   "https://tenant.example.com/",
+		"aud":   []string{"https://dev.healthtechalpha.com"},
+		"sub":   "user-123",
+		"scope": "openid profile",
+		"exp":   time.Now().Add(5 * time.Minute).Unix(),
+		"iat":   time.Now().Unix(),
+	}
+	tok := signToken(t, priv, "kid1", "RS256", claims)
+	hdr := http.Header{"Authorization": []string{"Bearer " + tok}}
+
+	err := svc.ValidateMCPAuth(context.Background(), hdr)
+	if err != nil {
+		t.Fatalf("expected additional audience to be accepted, got %v", err)
+	}
+}
+
 func TestConfig_Initialize_McpEnabledRequiresAuthorizationServer(t *testing.T) {
 	cfg := Config{
-		Name:        "a",
-		Type:        AuthServiceType,
-		Domain:      "https://tenant.example.com",
-		Audience:    "https://api.example.com",
-		McpEnabled:  true,
+		Name:       "a",
+		Type:       AuthServiceType,
+		Domain:     "https://tenant.example.com",
+		Audience:   "https://api.example.com",
+		McpEnabled: true,
 		// AuthorizationServer intentionally empty
 	}
 	_, err := cfg.Initialize()
