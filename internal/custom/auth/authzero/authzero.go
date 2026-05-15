@@ -41,12 +41,12 @@ var _ auth.AuthServiceConfig = Config{}
 
 // Config is the AuthZero (OIDC/JWT) service configuration.
 type Config struct {
-	Name        string   `yaml:"name" validate:"required"`
-	Type        string   `yaml:"type" validate:"required"`
-	Domain      string   `yaml:"domain" validate:"required,url"`
-	Audience    string   `yaml:"audience" validate:"required,url"`
-	AllowedAlgs []string `yaml:"allowedAlgs" validate:"omitempty"` // default: ["RS256"]
-	Leeway      string   `yaml:"leeway" validate:"omitempty"`      // Go duration; default 30s
+	Name        string        `yaml:"name" validate:"required"`
+	Type        string        `yaml:"type" validate:"required"`
+	Domain      string        `yaml:"domain" validate:"required,url"`
+	Audience    interface{}   `yaml:"audience" validate:"required"` // supports scalar string or []string
+	AllowedAlgs []string      `yaml:"allowedAlgs" validate:"omitempty"` // default: ["RS256"]
+	Leeway      string        `yaml:"leeway" validate:"omitempty"`      // Go duration; default 30s
 
 	// McpEnabled, when true, requires a valid Authorization Bearer JWT on every /mcp request (including tools/list).
 	// AuthorizationServer is the OAuth issuer URL used for /.well-known/oauth-protected-resource when MCP auth is enabled.
@@ -91,10 +91,32 @@ func (cfg Config) Initialize() (auth.AuthService, error) {
 		return nil, fmt.Errorf("failed to create JWKS keyfunc from %s: %w", jwksURL, err)
 	}
 	logger.Info("jwks_loaded", "url", jwksURL)
+
+	// Parse audience as scalar or array, supporting both YAML forms without custom unmarshaler.
+	var audiences []string
+	switch a := cfg.Audience.(type) {
+	case string:
+		if a != "" {
+			audiences = []string{a}
+		}
+	case []interface{}:
+		for _, v := range a {
+			if s, ok := v.(string); ok && s != "" {
+				audiences = append(audiences, s)
+			}
+		}
+	case []string:
+		audiences = a
+	}
+
+	if len(audiences) == 0 {
+		return nil, fmt.Errorf("Auth0:Audience must be a non-empty string or list of strings")
+	}
+
 	return &AuthService{
 		Config:      cfg,
 		Domain:      host,
-		Audience:    cfg.Audience,
+		Audiences:   audiences,
 		kf:          kf,
 		allowedAlgs: allowedAlgs,
 		leeway:      leeway,
@@ -108,11 +130,18 @@ var _ auth.AuthService = (*AuthService)(nil)
 type AuthService struct {
 	Config
 	Domain      string
-	Audience    string
+	Audiences   []string
 	kf          keyfunc.Keyfunc
 	allowedAlgs []string
 	leeway      time.Duration
 	logger      *slog.Logger
+}
+
+func (a *AuthService) isAllowedAudience(candidate string) bool {
+	if candidate == "" {
+		return false
+	}
+	return slices.Contains(a.Audiences, candidate)
 }
 
 // AuthServiceType implements auth.AuthService.
@@ -192,10 +221,10 @@ func (a *AuthService) GetClaimsFromHeader(ctx context.Context, h http.Header) (m
 	audOK := false
 	switch audVal := audRaw.(type) {
 	case string:
-		audOK = audVal == a.Audience
+		audOK = a.isAllowedAudience(audVal)
 	case []interface{}:
 		for _, v := range audVal {
-			if s, ok := v.(string); ok && s == a.Audience {
+			if s, ok := v.(string); ok && a.isAllowedAudience(s) {
 				audOK = true
 				break
 			}
