@@ -44,7 +44,7 @@ func TestContextKeys_TypedAndLegacy(t *testing.T) {
 		t.Fatalf("typed key: request id mismatch: %q", got)
 	}
 	s, e := UserInfoFromContext(ctx)
-	if s != "abc" || e != "user@example.com" {
+	if s != "abc" || e != "" {
 		t.Fatalf("typed key: user info mismatch: %q %q", s, e)
 	}
 
@@ -60,7 +60,7 @@ func TestContextKeys_TypedAndLegacy(t *testing.T) {
 		t.Fatalf("legacy key: request id mismatch: %q", got)
 	}
 	s, e = UserInfoFromContext(legacy)
-	if s != "abc" || e != "user@example.com" {
+	if s != "abc" || e != "" {
 		t.Fatalf("legacy key: user info mismatch: %q %q", s, e)
 	}
 }

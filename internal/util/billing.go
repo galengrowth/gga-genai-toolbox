@@ -289,43 +289,7 @@ func UserInfoFromContext(ctx context.Context) (sub, email string) {
 	if s, ok := claims["sub"].(string); ok {
 		sub = s
 	}
-	// Try standard claim first
-	if e, ok := claims["email"].(string); ok {
-		email = e
-	}
-	// Try common alternates if standard email not present
-	if email == "" {
-		for _, k := range []string{"upn", "preferred_username"} {
-			if v, ok := claims[k].(string); ok && isLikelyEmail(v) {
-				email = v
-				break
-			}
-		}
-	}
-	// Try namespaced/custom claims that include "email" in the key
-	if email == "" {
-		for k, v := range claims {
-			if strings.Contains(strings.ToLower(k), "email") {
-				if vs, ok := v.(string); ok && isLikelyEmail(vs) {
-					email = vs
-					break
-				}
-			}
-		}
-	}
 	return
-}
-
-// isLikelyEmail does a light heuristic check for email-looking strings
-func isLikelyEmail(s string) bool {
-	if s == "" {
-		return false
-	}
-	if !strings.Contains(s, "@") {
-		return false
-	}
-	parts := strings.SplitN(s, "@", 2)
-	return len(parts) == 2 && strings.Contains(parts[1], ".")
 }
 
 func RequestIDFromContext(ctx context.Context) string {

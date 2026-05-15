@@ -36,7 +36,7 @@ Parsing is implemented in `cmd/internal/config.go` (`extractCustomFromYAML`). Re
 
 | Key | Type | Purpose |
 |-----|------|--------|
-| **`billingEndpoint`** | string (URL) | JSON **POST** target for **usage / billing** events after a **successful** tool invocation. Payload includes `user_sub`, `user_email`, `tool`, `row_count`, `query`, `request_id`, `timestamp`. The client **`Authorization`** header is forwarded when present. |
+| **`billingEndpoint`** | string (URL) | JSON **POST** target for **usage / billing** events after a **successful** tool invocation. Payload includes `user_sub`, `tool`, `row_count`, `query`, `request_id`, `timestamp` (`user_email` may be omitted as a legacy optional field). The client **`Authorization`** header is forwarded when present. |
 | **`requireBillingPost`** | bool (or string `"true"` / int `1`) | Does **not** control whether POSTs are sent when `billingEndpoint` is set; POSTs are sent when the URL is configured. This flag controls **severity of logging** when the billing HTTP call fails (e.g. transport error or non-2xx): stricter **error**-level logs when `true`, **warn**-level when unset/false. |
 
 #### Billing payload: `query` and `row_count` (implementation detail)
@@ -59,7 +59,7 @@ Strings are capped at **64KiB** UTF-8 bytes (`maxBillingQueryLen`).
 
 | Key | Type | Purpose |
 |-----|------|--------|
-| **`quotaEndpoint`** | string (URL) | JSON **POST** target for **preflight authorization** before **`tool.Invoke`**. The request includes `user_sub`, `user_email`, `tool`, optional `requested_rows`, `request_id`, `timestamp`. **`Authorization`** is forwarded when present. |
+| **`quotaEndpoint`** | string (URL) | JSON **POST** target for **preflight authorization** before **`tool.Invoke`**. The request includes `user_sub`, `tool`, optional `requested_rows`, `request_id`, `timestamp` (`user_email` may be omitted as a legacy optional field). **`Authorization`** is forwarded when present. |
 | **`requireQuotaPreflight`** | bool | **Legacy / compatibility.** Quota preflight runs when **`quotaEndpoint`** is set; this flag is still parsed and stored on context but **does not** disable the quota call when omitted. |
 
 **Expected response:** JSON with **`allowed`** (bool). HTTP **2xx** and **429** / **403** bodies are parsed when possible; **400** is treated as a denial path when the body indicates failure. Empty or malformed bodies are handled conservatively (see `internal/util/quota.go`).
