@@ -500,6 +500,10 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	openaiChallenge, err := buildOpenAIAppsChallenge(cfg.Custom)
+	if err != nil {
+		return nil, err
+	}
 
 	addr := net.JoinHostPort(cfg.Address, strconv.Itoa(cfg.Port))
 	srv := &http.Server{Addr: addr, Handler: r}
@@ -604,6 +608,11 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 			_, _ = w.Write([]byte(`{"claude_oauth_proxy":true}`))
 		})
 		l.InfoContext(ctx, "Claude OAuth proxy enabled: GET /authorize, POST /token, POST /register, GET /oauthproxy/ping")
+	}
+
+	if openaiChallenge != nil {
+		r.Get("/.well-known/openai-apps-challenge", openaiChallenge.serve)
+		l.InfoContext(ctx, "OpenAI domain verification enabled: GET /.well-known/openai-apps-challenge")
 	}
 
 	// control plane

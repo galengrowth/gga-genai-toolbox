@@ -1,6 +1,6 @@
 # Fork-specific code (`internal/custom`)
 
-Implementation packages for this fork (Auth0 MCP, HTA helpers, SQL validation helpers, preflight wiring, etc.). **User-facing documentation** for `custom:` YAML keys, quota/billing behavior, and OAuth options lives in the repo root: **[FORK.md](../../FORK.md)**.
+Implementation packages for this fork (Auth0 MCP, HTA helpers, SQL validation helpers, preflight wiring, etc.). **User-facing documentation** for `custom:` YAML keys, quota/billing behavior, OAuth options, and **ChatGPT domain verification** lives in the repo root: **[FORK.md](../../FORK.md)**.
 
 ## Reducing merge conflicts with upstream genai-toolbox
 
