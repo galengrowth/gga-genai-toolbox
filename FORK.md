@@ -88,6 +88,38 @@ Strings are capped at **64KiB** UTF-8 bytes (`maxBillingQueryLen`).
 
 ---
 
+### OpenAI Apps domain verification (ChatGPT Business publish)
+
+Required when submitting a **ChatGPT app** that uses your MCP server. OpenAI checks that you control the MCP hostname by requesting a token at a fixed path.
+
+| Key | Type | Purpose |
+|-----|------|--------|
+| **`openaiAppsDomainVerification`** | bool | Enables **`GET /.well-known/openai-apps-challenge`**. |
+| **`openaiAppsVerificationToken`** | string | Token from the OpenAI platform app submission UI. Response is **plain text** (`text/plain`), HTTP **200**. |
+
+**Example** (flat `kind: custom` document, same file as billing/OAuth keys):
+
+```yaml
+openaiAppsDomainVerification: true
+openaiAppsVerificationToken: "<token-from-openai-dashboard>"
+```
+
+**Validation:** If **`openaiAppsDomainVerification`** is `true` and **`openaiAppsVerificationToken`** is empty, the server **fails at startup**.
+
+**Ingress:** Route **`/.well-known/openai-apps-challenge`** to Toolbox on the public MCP host (e.g. `mcp-dev.healthtechalpha.com`), same as **`/.well-known/oauth-protected-resource`**.
+
+**Smoke test after deploy:**
+
+```bash
+curl -i https://mcp-dev.healthtechalpha.com/.well-known/openai-apps-challenge
+```
+
+Expect `200`, `Content-Type: text/plain`, body equals the configured token. Then click **Verify Domain** in the OpenAI apps dashboard.
+
+**Related:** ChatGPT app publish also requires explicit **tool annotations** (`readOnlyHint`, `destructiveHint`, `openWorldHint`) on every tool in your YAML — see [Tools — Tool Annotations](https://mcp-toolbox.dev/documentation/configuration/tools/).
+
+---
+
 ### Debugging (dangerous)
 
 | Key | Type | Purpose |
@@ -176,12 +208,14 @@ Resolve conflicts before continuing. **Prefer keeping fork behavior** for `custo
 | 1 | `internal/custom/**` | Your fork logic—keep your versions unless upstream fixes a bug you need. |
 | 2 | `internal/sources/mysql/mysql.go` | Fork adds `customutil.ValidateSQLForDatabase` in `RunSQL`—re-apply that hunk if upstream edits `RunSQL`. |
 | 2b | `internal/sources/cloudsqlmysql/cloud_sql_mysql.go` | Fork adds **`queryTimeout`** / **`queryParams`** DSN parity with `mysql`; re-apply if upstream edits Cloud SQL DSN building. |
-| 3 | `internal/server/server.go` | Billing/quota context middleware, `debugLogAuthToken`, startup logs. |
-| 4 | `internal/server/mcp.go` | MCP routing, PRM, Claude proxy registration. |
-| 5 | `internal/server/mcp/v*/method.go` (all versions) | `EnrichContextWithAuthForBillingQuota`, `QuotaPreflightBeforeInvoke`, `LogAndPostBilling`. |
-| 6 | `internal/server/api.go` | REST `/api` parity with MCP for billing/quota. |
-| 7 | `internal/util/billing.go`, `internal/util/quota.go`, `billing_tokens_block.go` | Shared HTTP helpers. |
-| 8 | `cmd/root.go` | Flags / `ToolboxUrl` / MCP auth validation. |
+| 3 | `internal/server/server.go` | Billing/quota context middleware, `debugLogAuthToken`, startup logs; re-apply **Claude proxy** and **OpenAI domain verification** route registration. |
+| 4 | `internal/server/openai_apps_challenge.go` | Fork-only ChatGPT domain verification handler — keep entire file. |
+| 4b | `internal/server/oauth_claude_proxy.go` | Fork-only Claude OAuth proxy — keep entire file. |
+| 5 | `internal/server/mcp.go` | MCP routing, PRM, Claude proxy registration. |
+| 6 | `internal/server/mcp/v*/method.go` (all versions) | `EnrichContextWithAuthForBillingQuota`, `QuotaPreflightBeforeInvoke`, `LogAndPostBilling`. |
+| 7 | `internal/server/api.go` | REST `/api` parity with MCP for billing/quota. |
+| 8 | `internal/util/billing.go`, `internal/util/quota.go`, `billing_tokens_block.go` | Shared HTTP helpers. |
+| 9 | `cmd/root.go` | Flags / `ToolboxUrl` / MCP auth validation. |
 
 If upstream adds a **new MCP protocol version** directory under `internal/server/mcp/`, copy the same **three** call patterns from an existing `method.go` into the new handler.
 
@@ -199,6 +233,7 @@ Add broader `./...` when you have time; fix any new upstream tests that assume s
 - Start with a config that sets **`quotaEndpoint`** and **`billingEndpoint`** (mock or dev URLs).
 - Call **`tools/call`** (or REST **`/api`** if enabled) **with** a valid **`Authorization`** header.
 - Confirm: quota preflight runs before invoke; billing POST runs after success; logs show expected `quota:` / `billing:` debug lines if log level allows.
+- If **`openaiAppsDomainVerification`** is enabled: `curl -i https://<public-mcp-host>/.well-known/openai-apps-challenge` returns **200** and the configured token as **plain text**.
 
 ### 6. Update this document after the sync
 
@@ -248,7 +283,7 @@ Use this table when merging **upstream**: re-apply or preserve these paths if Gi
 
 | File | Role |
 |------|------|
-| `internal/server/server.go` | `custom:` wiring, CORS, **billing/quota context** on requests, **`mcpAuthMiddleware`**, PRM + manual PRM + **fork PRM** routes, Claude proxy mount. |
+| `internal/server/server.go` | `custom:` wiring, CORS, **billing/quota context** on requests, **`mcpAuthMiddleware`**, PRM + manual PRM + **fork PRM** routes, Claude proxy mount, **OpenAI domain verification** route. |
 | `internal/server/mcp.go` | MCP router, **`prmHandler`** (auth-based PRM JSON), SSE/HTTP handlers importing **`authzero`**. |
 | `internal/server/mcp/v20241105/method.go` | Per-version: **`EnrichContextWithAuthForBillingQuota`**, **`QuotaPreflightBeforeInvoke`**, **`LogAndPostBilling`**. |
 | `internal/server/mcp/v20250326/method.go` | Same pattern. |
@@ -258,6 +293,8 @@ Use this table when merging **upstream**: re-apply or preserve these paths if Gi
 | `internal/server/config.go` | Imports **`authzero`** / **`hta`** for YAML unmarshaling. |
 | `internal/server/oauth_metadata.go` | Fork PRM parsing from `custom:` (`parseOAuthProtectedResourceMetadata`). |
 | `internal/server/oauth_claude_proxy.go` | Claude OAuth proxy to Auth0. |
+| `internal/server/openai_apps_challenge.go` | ChatGPT Apps domain verification at `/.well-known/openai-apps-challenge`. |
+| `internal/server/openai_apps_challenge_test.go` | Tests for OpenAI domain verification. |
 | `internal/server/prm.go` | `ProtectedResourceMetadata` struct (RFC 9728 fields). |
 
 ### MySQL sources
@@ -288,4 +325,5 @@ Use this table when merging **upstream**: re-apply or preserve these paths if Gi
 - `internal/util/billing.go`, `internal/util/quota.go` — HTTP clients and context keys.
 - `internal/custom/util/preflight.go` — quota preflight orchestration.
 - `internal/server/oauth_metadata.go`, `oauth_claude_proxy.go` — OAuth PRM and Claude proxy.
+- `internal/server/openai_apps_challenge.go` — ChatGPT Apps domain verification.
 - `internal/tools/billing.go` — **`query` / `row_count`** for billing POST body.
