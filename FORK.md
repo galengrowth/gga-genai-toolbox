@@ -12,10 +12,11 @@ This is **fork-specific documentation**. It is **not** the official Google MCP T
 
 | Path | Purpose |
 |------|---------|
-| `internal/custom/util/` | Preflight helpers, billing/quota context enrichment, **`ValidateSQLForDatabase`** (MySQL), SQL tests |
+| `internal/custom/util/` | Preflight helpers, billing/quota context enrichment, **`ValidateSQLForDatabase`** (USE / other-db on `mysql` `RunSQL`) and **`ValidateExecuteSQL`** (user SQL on `mysql-execute-sql`), SQL tests |
 | `internal/custom/auth/authzero/` | Auth0 JWT validation + **`mcpEnabled`** gate for MCP |
 | `internal/custom/auth/hta/` | HTA-specific auth helpers (if used) |
-| `internal/sources/mysql/mysql.go` | **Single choke point** for MySQL SQL validation: `RunSQL` calls `customutil.ValidateSQLForDatabase` before `QueryContext` |
+| `internal/sources/mysql/mysql.go` | `RunSQL` calls **`ValidateSQLForDatabase`** before `QueryContext` (does **not** apply to `cloud-sql-mysql`) |
+| `internal/tools/mysql/mysqlexecutesql/mysqlexecutesql.go` | **`ValidateExecuteSQL`** before `RunSQL` — covers **both** `type: mysql` and `type: cloud-sql-mysql` |
 
 Merge-friendly practice: keep **business logic** in `internal/custom/**` and **thin** call sites in `internal/server/**` / `internal/util/**` where upstream also changes often. See `internal/custom/README.md` for conflict-minimization tips.
 
@@ -159,13 +160,35 @@ Bearer JWTs are validated with **public keys** from your IdP’s **JWKS** docume
 
 ## MySQL SQL guardrails
 
-Validation runs in **`internal/sources/mysql/mysql.go`** inside **`RunSQL`**:
+There are **two** layers. Heuristic only (not a full SQL parser).
 
-- Rejects **`USE`** (word-boundary).
+### 1. `ValidateSQLForDatabase` — generic `mysql` `RunSQL` only
+
+Call site: **`internal/sources/mysql/mysql.go`** → **`RunSQL`**.
+
+- Rejects **`USE`**.
 - Strips **`/* block */`** comments before checks.
-- Rejects `` `other_db`.`table` `` when `other_db` ≠ configured source **`database`** (case-insensitive), with allowances for **`information_schema`**, **`performance_schema`**, **`mysql`**, **`sys`**.
+- Rejects `` `other_db`.`table` `` when `other_db` ≠ configured source **`database`** (case-insensitive). **`information_schema`**, **`performance_schema`**, **`mysql`**, and **`sys`** are still allowed here so **`list_tables`** and similar tools can query catalogs.
 
-Heuristic only—not a full SQL parser.
+**`type: cloud-sql-mysql` `RunSQL` does not call this.** Live (`live.yaml`) uses Cloud SQL, so this layer alone would **not** stop ChatGPT probes on production.
+
+### 2. `ValidateExecuteSQL` — `execute_sql` tool (both MySQL sources)
+
+Call site: **`internal/tools/mysql/mysqlexecutesql`** **`Invoke`**, **before** `source.RunSQL`. The tool’s compatible source interface requires **`MySQLDatabase()`**, which **both** `mysql` and `cloud-sql-mysql` implement. Arbitrary user SQL is therefore validated for **dev (`type: mysql`) and live (`type: cloud-sql-mysql`)**.
+
+**`list_tables` does not use this function**, so it can still query `INFORMATION_SCHEMA` internally.
+
+Allowed: a **single** `SELECT` or `WITH … SELECT` against the configured application database.
+
+Denied (examples match ChatGPT review probes): `SHOW …`, `PROCESSLIST`, `information_schema` / `performance_schema` / `` `mysql` `` / `` `sys` ``, `@@` variables, `CURRENT_USER()` / `USER()` / `DATABASE()` / `VERSION()` / similar, `USE`, other-database backtick qualifiers, `INTO OUTFILE` / `DUMPFILE`, writes, multiple statements.
+
+MCP clients get an **agent/tool error** (`isError: true`), text exactly:
+
+`this operation is not supported`
+
+Schema discovery for agents: use **`list_tables`**, not `execute_sql`.
+
+Tests: **`internal/custom/util/sql_validation_test.go`**.
 
 ### Cloud SQL for MySQL (`type: cloud-sql-mysql`)
 
@@ -207,7 +230,8 @@ Resolve conflicts before continuing. **Prefer keeping fork behavior** for `custo
 |----------|------|-----|
 | 1 | `internal/custom/**` | Your fork logic—keep your versions unless upstream fixes a bug you need. |
 | 2 | `internal/sources/mysql/mysql.go` | Fork adds `customutil.ValidateSQLForDatabase` in `RunSQL`—re-apply that hunk if upstream edits `RunSQL`. |
-| 2b | `internal/sources/cloudsqlmysql/cloud_sql_mysql.go` | Fork adds **`queryTimeout`** / **`queryParams`** DSN parity with `mysql`; re-apply if upstream edits Cloud SQL DSN building. |
+| 2b | `internal/sources/cloudsqlmysql/cloud_sql_mysql.go` | Fork adds **`queryTimeout`** / **`queryParams`** DSN parity with `mysql`; re-apply if upstream edits Cloud SQL DSN building. **Do not** assume execute_sql guardrails live here — they are on the tool. |
+| 2c | `internal/tools/mysql/mysqlexecutesql/mysqlexecutesql.go` | Fork calls **`ValidateExecuteSQL`** in **`Invoke`**. Re-apply if upstream edits `Invoke`. |
 | 3 | `internal/server/server.go` | Billing/quota context middleware, `debugLogAuthToken`, startup logs; re-apply **Claude proxy** and **OpenAI domain verification** route registration. |
 | 4 | `internal/server/openai_apps_challenge.go` | Fork-only ChatGPT domain verification handler — keep entire file. |
 | 4b | `internal/server/oauth_claude_proxy.go` | Fork-only Claude OAuth proxy — keep entire file. |
@@ -259,7 +283,7 @@ Use this table when merging **upstream**: re-apply or preserve these paths if Gi
 | File | Role |
 |------|------|
 | `internal/custom/README.md` | Pointers to this doc; merge-conflict tips. |
-| `internal/custom/util/sql_validation.go` | `ValidateSQLForDatabase` (MySQL guardrails). |
+| `internal/custom/util/sql_validation.go` | `ValidateSQLForDatabase` (USE / other-db) and `ValidateExecuteSQL` (no schema/system introspection on `mysql-execute-sql`). |
 | `internal/custom/util/sql_validation_test.go` | Tests for SQL validation. |
 | `internal/custom/util/preflight.go` | `PerformPreflightCheck`: quota HTTP + billing “insufficient tokens” block gate. |
 | `internal/custom/util/billing_context.go` | `EnrichContextWithAuthForBillingQuota`, `QuotaPreflightBeforeInvoke`. |
@@ -302,7 +326,8 @@ Use this table when merging **upstream**: re-apply or preserve these paths if Gi
 | File | Role |
 |------|------|
 | `internal/sources/mysql/mysql.go` | **`RunSQL`**: calls **`customutil.ValidateSQLForDatabase`** before `QueryContext`. Supports **`queryTimeout`** / **`queryParams`** (upstream). |
-| `internal/sources/cloudsqlmysql/cloud_sql_mysql.go` | Cloud SQL connector pool; **fork**: **`queryTimeout`** / **`queryParams`** on DSN (same semantics as `mysql`). `dsn_test.go` covers query string. |
+| `internal/sources/cloudsqlmysql/cloud_sql_mysql.go` | Cloud SQL connector pool; **fork**: **`queryTimeout`** / **`queryParams`** on DSN (same semantics as `mysql`). `dsn_test.go` covers query string. No `ValidateSQLForDatabase` in `RunSQL`. |
+| `internal/tools/mysql/mysqlexecutesql/mysqlexecutesql.go` | **`ValidateExecuteSQL`** in **`Invoke`** (mysql + cloud-sql-mysql). |
 
 ### CLI / config
 
