@@ -6,18 +6,32 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 )
 
+// ErrExecuteSQLUnsupported is the client-facing error for mysql-execute-sql denials.
+var ErrExecuteSQLUnsupported = errors.New("this operation is not supported")
+
 var (
 	reBlockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	reLineComment  = regexp.MustCompile(`(?m)--[^\n]*`)
+	reHashComment  = regexp.MustCompile(`(?m)#[^\n]*`)
+	reSingleQuoted = regexp.MustCompile(`'(?:\\.|''|[^'\\])*'`)
+	reDoubleQuoted = regexp.MustCompile(`"(?:\\.|""|[^"\\])*"`)
 	// Word-boundary USE (avoids matching "misUSE" in identifiers).
 	reUseStatement = regexp.MustCompile(`(?i)\bUSE\s+`)
 	// MySQL explicit cross-database form: `db`.`table` — first identifier is the database name.
 	// Unquoted db.table is not validated (would false-positive alias.column, e.g. u.name).
 	reBacktickQualified = regexp.MustCompile("`([^`]+)`\\s*\\.\\s*`([^`]+)`")
+	reSelectOrWith = regexp.MustCompile(`(?i)^\s*(WITH|SELECT)\b`)
+	reProcesslist  = regexp.MustCompile(`(?i)\bPROCESSLIST\b`)
+	reSystemVar         = regexp.MustCompile(`@@`)
+	reIntrospectFn      = regexp.MustCompile(`(?i)\b(?:CURRENT_USER|SESSION_USER|SYSTEM_USER|DATABASE|SCHEMA|VERSION|CONNECTION_ID|USER)\s*\(`)
+	reIntoDump          = regexp.MustCompile(`(?i)\bINTO\s+(?:OUTFILE|DUMPFILE)\b`)
+	reSystemSchema      = regexp.MustCompile("(?i)(?:\\binformation_schema\\b|\\bperformance_schema\\b|`mysql`|`sys`|\\bmysql\\s*\\.|\\bsys\\s*\\.)")
 )
 
 // ValidateSQLForDatabase checks that SQL does not switch databases or reference other
@@ -42,6 +56,55 @@ func ValidateSQLForDatabase(sql, database string) error {
 		return nil
 	}
 	return rejectForeignDatabaseQualifiers(sql, database)
+}
+
+// ValidateExecuteSQL applies ChatGPT / public-MCP guardrails on user-supplied SQL for
+// mysql-execute-sql. list_tables (and other tools) keep using ValidateSQLForDatabase
+// only, so they may still query INFORMATION_SCHEMA internally.
+//
+// Allowed: a single SELECT or WITH ... SELECT against the configured database.
+// Denied: SHOW, PROCESSLIST, system schemas, @@vars, session/user introspection
+// functions, USE, and other-database qualifiers.
+func ValidateExecuteSQL(sql, database string) error {
+	sql = strings.TrimSpace(sql)
+	if sql == "" {
+		return ErrExecuteSQLUnsupported
+	}
+
+	if err := ValidateSQLForDatabase(sql, database); err != nil {
+		return ErrExecuteSQLUnsupported
+	}
+
+	stripped := stripSQLNoise(sql)
+	if stripped == "" {
+		return ErrExecuteSQLUnsupported
+	}
+
+	if !reSelectOrWith.MatchString(stripped) ||
+		hasTrailingStatement(stripped) ||
+		reProcesslist.MatchString(stripped) ||
+		reSystemSchema.MatchString(stripped) ||
+		reSystemVar.MatchString(stripped) ||
+		reIntrospectFn.MatchString(stripped) ||
+		reIntoDump.MatchString(stripped) {
+		return ErrExecuteSQLUnsupported
+	}
+	return nil
+}
+
+func stripSQLNoise(sql string) string {
+	sql = reBlockComment.ReplaceAllString(sql, " ")
+	sql = reLineComment.ReplaceAllString(sql, " ")
+	sql = reHashComment.ReplaceAllString(sql, " ")
+	sql = reSingleQuoted.ReplaceAllString(sql, "''")
+	sql = reDoubleQuoted.ReplaceAllString(sql, `""`)
+	return strings.TrimSpace(sql)
+}
+
+func hasTrailingStatement(sql string) bool {
+	// Ignore a single trailing semicolon on an otherwise single statement.
+	trimmed := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(sql), ";"))
+	return strings.Contains(trimmed, ";")
 }
 
 func rejectUseStatement(sql string) error {

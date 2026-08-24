@@ -21,6 +21,7 @@ import (
 	"net/http"
 
 	yaml "github.com/goccy/go-yaml"
+	customutil "github.com/googleapis/mcp-toolbox/internal/custom/util"
 	"github.com/googleapis/mcp-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/mcp-toolbox/internal/sources"
 	"github.com/googleapis/mcp-toolbox/internal/tools"
@@ -46,6 +47,7 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	MySQLPool() *sql.DB
+	MySQLDatabase() string
 	RunSQL(context.Context, string, []any) (any, error)
 }
 
@@ -110,6 +112,9 @@ func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, para
 		return nil, util.NewClientServerError("error getting logger", http.StatusInternalServerError, err)
 	}
 	logger.DebugContext(ctx, fmt.Sprintf("executing `%s` tool query: %s", resourceType, sqlStr))
+	if err := customutil.ValidateExecuteSQL(sqlStr, source.MySQLDatabase()); err != nil {
+		return nil, util.NewAgentError(err.Error(), nil)
+	}
 	resp, err := source.RunSQL(ctx, sqlStr, nil)
 	if err != nil {
 		return nil, util.ProcessGeneralError(err)
