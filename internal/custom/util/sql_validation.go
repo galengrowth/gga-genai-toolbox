@@ -15,6 +15,39 @@ import (
 // ErrExecuteSQLUnsupported is the client-facing error for mysql-execute-sql denials.
 var ErrExecuteSQLUnsupported = errors.New("this operation is not supported")
 
+// deniedExecuteSQLFunctions is the canonical function denylist shared by the
+// regex preflight and AST validation layers. Keep names lowercase.
+var deniedExecuteSQLFunctions = []string{
+	"current_user",
+	"current_role",
+	"session_user",
+	"system_user",
+	"user",
+	"database",
+	"schema",
+	"version",
+	"icu_version",
+	"connection_id",
+	"roles_graphml",
+	"found_rows",
+	"last_insert_id",
+	"row_count",
+	"uuid_short",
+	"ps_current_thread_id",
+	"ps_thread_id",
+	"load_file",
+	"sleep",
+	"benchmark",
+	"get_lock",
+	"is_free_lock",
+	"is_used_lock",
+	"release_lock",
+	"release_all_locks",
+	"master_pos_wait",
+	"source_pos_wait",
+	"wait_for_executed_gtid_set",
+}
+
 var (
 	reBlockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
 	reLineComment  = regexp.MustCompile(`(?m)--[^\n]*`)
@@ -26,12 +59,13 @@ var (
 	// MySQL explicit cross-database form: `db`.`table` — first identifier is the database name.
 	// Unquoted db.table is not validated (would false-positive alias.column, e.g. u.name).
 	reBacktickQualified = regexp.MustCompile("`([^`]+)`\\s*\\.\\s*`([^`]+)`")
-	reSelectOrWith = regexp.MustCompile(`(?i)^\s*(WITH|SELECT)\b`)
-	reProcesslist  = regexp.MustCompile(`(?i)\bPROCESSLIST\b`)
+	reSelectOrWith      = regexp.MustCompile(`(?i)^\s*(WITH|SELECT)\b`)
+	reProcesslist       = regexp.MustCompile(`(?i)\bSHOW\s+(?:FULL\s+)?PROCESSLIST\b`)
 	reSystemVar         = regexp.MustCompile(`@@`)
-	reIntrospectFn      = regexp.MustCompile(`(?i)\b(?:CURRENT_USER|SESSION_USER|SYSTEM_USER|DATABASE|SCHEMA|VERSION|CONNECTION_ID|USER)\s*\(`)
+	reDeniedFunction    = regexp.MustCompile(`(?i)\b(?:` + strings.Join(deniedExecuteSQLFunctions, "|") + `)\s*\(`)
 	reIntoDump          = regexp.MustCompile(`(?i)\bINTO\s+(?:OUTFILE|DUMPFILE)\b`)
-	reSystemSchema      = regexp.MustCompile("(?i)(?:\\binformation_schema\\b|\\bperformance_schema\\b|`mysql`|`sys`|\\bmysql\\s*\\.|\\bsys\\s*\\.)")
+	reLockingRead       = regexp.MustCompile(`(?i)\b(?:FOR\s+(?:UPDATE|SHARE)|LOCK\s+IN\s+SHARE\s+MODE)\b`)
+	reSystemSchema      = regexp.MustCompile("(?i)(?:`(?:information_schema|performance_schema|mysql|sys)`|\\b(?:information_schema|performance_schema|mysql|sys)\\b)\\s*\\.")
 )
 
 // ValidateSQLForDatabase checks that SQL does not switch databases or reference other
@@ -85,19 +119,20 @@ func ValidateExecuteSQL(sql, database string) error {
 		reProcesslist.MatchString(stripped) ||
 		reSystemSchema.MatchString(stripped) ||
 		reSystemVar.MatchString(stripped) ||
-		reIntrospectFn.MatchString(stripped) ||
-		reIntoDump.MatchString(stripped) {
+		reDeniedFunction.MatchString(stripped) ||
+		reIntoDump.MatchString(stripped) ||
+		reLockingRead.MatchString(stripped) {
 		return ErrExecuteSQLUnsupported
 	}
-	return nil
+	return validateExecuteSQLAST(sql, database)
 }
 
 func stripSQLNoise(sql string) string {
+	sql = reSingleQuoted.ReplaceAllString(sql, "''")
+	sql = reDoubleQuoted.ReplaceAllString(sql, `""`)
 	sql = reBlockComment.ReplaceAllString(sql, " ")
 	sql = reLineComment.ReplaceAllString(sql, " ")
 	sql = reHashComment.ReplaceAllString(sql, " ")
-	sql = reSingleQuoted.ReplaceAllString(sql, "''")
-	sql = reDoubleQuoted.ReplaceAllString(sql, `""`)
 	return strings.TrimSpace(sql)
 }
 
