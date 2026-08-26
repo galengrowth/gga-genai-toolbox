@@ -186,9 +186,11 @@ Validation is fail-closed:
 - The original SQL is then parsed with `github.com/pingcap/tidb/pkg/parser`, pinned to commit **`202b7f47286a1109b5c957401d34c9358d130ae0`**. The blank-imported `pkg/parser/test_driver` is used only to construct parser AST values; validation does not restore, evaluate, or plan SQL.
 - Exactly one ordinary `SELECT` statement is accepted. The AST visitor covers CTEs, unions, and nested subqueries and rejects parse errors/panics, `TABLE` / `VALUES`, all `@` / `@@` variables, `SELECT INTO`, locking reads, system or foreign schema qualifiers, and denied function calls.
 
-Denied examples include `SHOW …`, system-schema access (`mysql`, `information_schema`, `performance_schema`, `sys`), `CURRENT_USER` / `VERSION()` and the canonical metadata/session functions, file/lock/delay hazards such as `LOAD_FILE()` / `GET_LOCK()` / `SLEEP()`, `USE`, cross-database qualifiers (quoted or unquoted), writes, malformed SQL, and multiple statements. Ordinary unqualified business identifiers named `users`, `version`, `processlist`, or `mysql` remain valid.
+Denied examples include `SHOW …`, system-schema access (`mysql`, `information_schema`, `performance_schema`, `sys`), `CURRENT_USER` / `VERSION()` and the canonical metadata/session functions, file/lock/delay hazards such as `LOAD_FILE()` / `GET_LOCK()` / `SLEEP()`, `USE`, cross-database qualifiers (quoted or unquoted), writes, malformed SQL, and multiple non-empty statements. The hazard list also explicitly denies `SYS_EXEC()`, `SYS_EVAL()`, `WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS()`, `MASTER_GTID_WAIT()`, `CHARSET()`, `COLLATION()`, `COERCIBILITY()`, `NAME_CONST()`, `EXTRACTVALUE()`, and `UPDATEXML()`.
 
-The database account remains **SELECT-only** as defense in depth and controls any indirect metadata exposure through otherwise permitted views or stored functions.
+Ordinary unqualified business identifiers named `users`, `version`, `processlist`, or `mysql` remain valid. Business spatial functions such as `ST_Buffer(POINT(...), ...)` remain permitted, and redundant trailing semicolons are treated as empty terminators rather than additional statements.
+
+The database account remains **SELECT-only** as defense in depth and controls any indirect metadata exposure through otherwise permitted views or stored functions. Unqualified UDFs and functions qualified with the configured database are structurally permitted; the database account's `EXECUTE` privileges decide whether those routines can run.
 
 MCP clients get an **agent/tool error** (`isError: true`), text exactly:
 

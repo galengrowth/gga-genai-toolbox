@@ -46,6 +46,16 @@ var deniedExecuteSQLFunctions = []string{
 	"master_pos_wait",
 	"source_pos_wait",
 	"wait_for_executed_gtid_set",
+	"sys_exec",
+	"sys_eval",
+	"wait_until_sql_thread_after_gtids",
+	"master_gtid_wait",
+	"charset",
+	"collation",
+	"coercibility",
+	"name_const",
+	"extractvalue",
+	"updatexml",
 }
 
 var (

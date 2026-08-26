@@ -69,6 +69,10 @@ func TestValidateExecuteSQL_allowsSelect(t *testing.T) {
 		"SELECT id FROM companies UNION ALL SELECT id FROM archived_companies",
 		"SELECT (SELECT MAX(id) FROM companies) AS max_id",
 		"SELECT HTA_MCP.business_score(id) FROM companies",
+		"SELECT ST_Buffer(POINT(0, 0), 1)",
+		"SELECT some_custom_udf(1)",
+		"SELECT HTA_MCP.some_fn(1)",
+		"SELECT 1;;",
 		"SELECT 'information_schema; VERSION() -- # /* comment */' AS literal",
 		"SELECT 1 /* information_schema VERSION() ; */",
 		"SELECT 1 -- information_schema VERSION() ;\n",
@@ -107,6 +111,44 @@ func TestValidateExecuteSQL_deniesFunctions(t *testing.T) {
 		"SELECT CURRENT_ROLE",
 		"SELECT CURRENT_ROLE()",
 	} {
+		if err := ValidateExecuteSQL(sql, "HTA_MCP"); err != ErrExecuteSQLUnsupported {
+			t.Errorf("got %v, want ErrExecuteSQLUnsupported for %s", err, sql)
+		}
+	}
+}
+
+func TestValidateExecuteSQL_deniesAdditionalHazardFunctions(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"SELECT SYS_EXEC('')",
+		"SELECT SYS_EVAL('')",
+		"SELECT WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS('', 0)",
+		"SELECT MASTER_GTID_WAIT('', 0)",
+		"SELECT CHARSET('x')",
+		"SELECT COLLATION('x')",
+		"SELECT COERCIBILITY('x')",
+		"SELECT NAME_CONST('a', 1)",
+		"SELECT EXTRACTVALUE('<a>1</a>', '/a')",
+		"SELECT UPDATEXML('<a>1</a>', '/a', '<b>2</b>')",
+		"SELECT COALESCE(EXTRACTVALUE('<a/>', '/a'), 'x')",
+		"SELECT IF(1 = 1, UPDATEXML('<a/>', '/a', '<b/>'), '')",
+		"SELECT HTA_MCP.EXTRACTVALUE('<a/>', '/a')",
+		"SELECT EXTRACTVALUE/**/('<a/>', '/a')",
+	}
+	for _, sql := range cases {
+		if err := ValidateExecuteSQL(sql, "HTA_MCP"); err != ErrExecuteSQLUnsupported {
+			t.Errorf("got %v, want ErrExecuteSQLUnsupported for %s", err, sql)
+		}
+	}
+}
+
+func TestValidateExecuteSQL_deniesProhibitedExpressionsInsideSpatialFunctions(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"SELECT ST_Buffer(POINT(VERSION(), 0), 1)",
+		"SELECT ST_Buffer(POINT((SELECT COUNT(*) FROM information_schema.tables), 0), 1)",
+	}
+	for _, sql := range cases {
 		if err := ValidateExecuteSQL(sql, "HTA_MCP"); err != ErrExecuteSQLUnsupported {
 			t.Errorf("got %v, want ErrExecuteSQLUnsupported for %s", err, sql)
 		}
@@ -163,6 +205,7 @@ func TestValidateExecuteSQL_deniesUnsupportedStatements(t *testing.T) {
 	t.Parallel()
 	cases := []string{
 		"SELECT 1; SELECT 2",
+		"SELECT 1;; SELECT 2",
 		"SELECT (",
 		"SHOW TABLES",
 		"EXPLAIN SELECT * FROM companies",
