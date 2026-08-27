@@ -16,7 +16,6 @@ package util
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 
 	"github.com/googleapis/mcp-toolbox/internal/util"
@@ -30,22 +29,19 @@ import (
 // authorize allows, we clear any stale billing block; the block still applies when quotaEndpoint is unset.
 func PerformPreflightCheck(ctx context.Context, toolName string) (bool, error) {
 	if util.QuotaEndpointFromContext(ctx) != "" {
-		allowed, remaining, reason, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
+		allowed, _, _, qerr := util.CheckQuotaAndAuthorize(ctx, toolName, nil)
 		if qerr != nil {
-			return false, util.NewClientServerError(fmt.Sprintf("quota preflight failed: %s", qerr), http.StatusServiceUnavailable, qerr)
+			return false, util.NewClientServerError("Usage limits could not be checked. Try again shortly.", http.StatusServiceUnavailable, nil)
 		}
 		if !allowed {
-			if reason == "" {
-				reason = "row limit exceeded"
-			}
-			return false, util.NewClientServerError(fmt.Sprintf("quota denied: %s (remaining_rows=%d)", reason, remaining), http.StatusTooManyRequests, nil)
+			return false, util.NewClientServerError("Query allowance exceeded. Reduce the result size or try again after reset.", http.StatusTooManyRequests, nil)
 		}
 		// Authorize upstream says OK — clear stale MCP-only billing block (see util/billing_tokens_block.go).
 		util.ClearBillingInsufficientTokensBlock(ctx)
 	}
 	if util.BillingInsufficientTokensBlocked(ctx) {
 		return false, util.NewClientServerError(
-			"billing reported insufficient tokens on a prior request; further tool calls are blocked until billing succeeds or the block expires",
+			"Your usage allowance is exhausted. Add credits or wait for it to reset.",
 			http.StatusTooManyRequests,
 			nil,
 		)

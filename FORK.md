@@ -160,7 +160,7 @@ Bearer JWTs are validated with **public keys** from your IdP’s **JWKS** docume
 
 ## MySQL SQL guardrails
 
-There are **two** layers. Heuristic only (not a full SQL parser).
+There are two validation entry points. The generic source check remains heuristic; the user-facing `execute_sql` check combines the existing regex preflight with TiDB AST validation.
 
 ### 1. `ValidateSQLForDatabase` — generic `mysql` `RunSQL` only
 
@@ -176,11 +176,21 @@ Call site: **`internal/sources/mysql/mysql.go`** → **`RunSQL`**.
 
 Call site: **`internal/tools/mysql/mysqlexecutesql`** **`Invoke`**, **before** `source.RunSQL`. The tool’s compatible source interface requires **`MySQLDatabase()`**, which **both** `mysql` and `cloud-sql-mysql` implement. Arbitrary user SQL is therefore validated for **dev (`type: mysql`) and live (`type: cloud-sql-mysql`)**.
 
-**`list_tables` does not use this function**, so it can still query `INFORMATION_SCHEMA` internally.
+Live exposes only **`execute_sql`** and **`list_tables`**. **`list_tables` does not use this function**, so its parameterized internal query can still read `INFORMATION_SCHEMA`; arbitrary SQL supplied to `execute_sql` must pass both validation layers.
 
 Allowed: a **single** `SELECT` or `WITH … SELECT` against the configured application database.
 
-Denied (examples match ChatGPT review probes): `SHOW …`, `PROCESSLIST`, `information_schema` / `performance_schema` / `` `mysql` `` / `` `sys` ``, `@@` variables, `CURRENT_USER()` / `USER()` / `DATABASE()` / `VERSION()` / similar, `USE`, other-database backtick qualifiers, `INTO OUTFILE` / `DUMPFILE`, writes, multiple statements.
+Validation is fail-closed:
+
+- Existing regex checks run first on sanitized SQL, including the canonical metadata/hazard function denylist and locking-read patterns.
+- The original SQL is then parsed with `github.com/pingcap/tidb/pkg/parser`, pinned to commit **`202b7f47286a1109b5c957401d34c9358d130ae0`**. The blank-imported `pkg/parser/test_driver` is used only to construct parser AST values; validation does not restore, evaluate, or plan SQL.
+- Exactly one ordinary `SELECT` statement is accepted. The AST visitor covers CTEs, unions, and nested subqueries and rejects parse errors/panics, `TABLE` / `VALUES`, all `@` / `@@` variables, `SELECT INTO`, locking reads, system or foreign schema qualifiers, and denied function calls.
+
+Denied examples include `SHOW …`, system-schema access (`mysql`, `information_schema`, `performance_schema`, `sys`), `CURRENT_USER` / `VERSION()` and the canonical metadata/session functions, file/lock/delay hazards such as `LOAD_FILE()` / `GET_LOCK()` / `SLEEP()`, `USE`, cross-database qualifiers (quoted or unquoted), writes, malformed SQL, and multiple non-empty statements. The hazard list also explicitly denies `SYS_EXEC()`, `SYS_EVAL()`, `WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS()`, `MASTER_GTID_WAIT()`, `CHARSET()`, `COLLATION()`, `COERCIBILITY()`, `NAME_CONST()`, `EXTRACTVALUE()`, and `UPDATEXML()`.
+
+Ordinary unqualified business identifiers named `users`, `version`, `processlist`, or `mysql` remain valid. Business spatial functions such as `ST_Buffer(POINT(...), ...)` remain permitted, and redundant trailing semicolons are treated as empty terminators rather than additional statements.
+
+The database account remains **SELECT-only** as defense in depth and controls any indirect metadata exposure through otherwise permitted views or stored functions. Unqualified UDFs and functions qualified with the configured database are structurally permitted; the database account's `EXECUTE` privileges decide whether those routines can run.
 
 MCP clients get an **agent/tool error** (`isError: true`), text exactly:
 
@@ -188,7 +198,7 @@ MCP clients get an **agent/tool error** (`isError: true`), text exactly:
 
 Schema discovery for agents: use **`list_tables`**, not `execute_sql`.
 
-Tests: **`internal/custom/util/sql_validation_test.go`**.
+Implementation: **`internal/custom/util/sql_validation.go`** (regex preflight/canonical functions) and **`internal/custom/util/sql_validation_ast.go`** (parser/AST visitor). Tests and fuzz seeds: **`internal/custom/util/sql_validation_test.go`**.
 
 ### Cloud SQL for MySQL (`type: cloud-sql-mysql`)
 
@@ -283,7 +293,8 @@ Use this table when merging **upstream**: re-apply or preserve these paths if Gi
 | File | Role |
 |------|------|
 | `internal/custom/README.md` | Pointers to this doc; merge-conflict tips. |
-| `internal/custom/util/sql_validation.go` | `ValidateSQLForDatabase` (USE / other-db) and `ValidateExecuteSQL` (no schema/system introspection on `mysql-execute-sql`). |
+| `internal/custom/util/sql_validation.go` | `ValidateSQLForDatabase`, plus the `ValidateExecuteSQL` regex preflight and canonical denied-function list. |
+| `internal/custom/util/sql_validation_ast.go` | Fail-closed TiDB parser/AST validation for `execute_sql`. |
 | `internal/custom/util/sql_validation_test.go` | Tests for SQL validation. |
 | `internal/custom/util/preflight.go` | `PerformPreflightCheck`: quota HTTP + billing “insufficient tokens” block gate. |
 | `internal/custom/util/billing_context.go` | `EnrichContextWithAuthForBillingQuota`, `QuotaPreflightBeforeInvoke`. |

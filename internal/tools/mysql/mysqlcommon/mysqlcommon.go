@@ -15,10 +15,45 @@
 package mysqlcommon
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"reflect"
+
+	driver "github.com/go-sql-driver/mysql"
+	"github.com/googleapis/mcp-toolbox/internal/util"
 )
+
+// ProcessError converts database failures into safe, actionable tool errors.
+func ProcessError(err error) util.ToolboxError {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return util.NewAgentError("The query timed out. Add filters or request fewer rows.", nil)
+	}
+
+	var mysqlErr *driver.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1054:
+			return util.NewAgentError("A column was not found. Use list_tables to verify column names.", nil)
+		case 1064:
+			return util.NewAgentError("The query has invalid MySQL syntax. Check it and try again.", nil)
+		case 1146:
+			return util.NewAgentError("A table was not found. Use list_tables to verify table names.", nil)
+		case 1044, 1045:
+			return util.NewAgentError("The database connection is not authorized. Contact support.", nil)
+		case 1142, 1143, 1227, 1370:
+			return util.NewAgentError("The database does not allow the requested table or function.", nil)
+		case 1205, 3024:
+			return util.NewAgentError("The query timed out. Add filters or request fewer rows.", nil)
+		}
+	}
+
+	return util.NewAgentError("The database could not complete the query. Try again later.", nil)
+}
 
 // ConvertToType handles casting mysql returns to the right type
 // types for mysql driver: https://github.com/go-sql-driver/mysql/blob/v1.9.3/fields.go
