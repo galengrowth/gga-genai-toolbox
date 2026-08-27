@@ -25,6 +25,7 @@ import (
 	"github.com/googleapis/mcp-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/mcp-toolbox/internal/sources"
 	"github.com/googleapis/mcp-toolbox/internal/tools"
+	"github.com/googleapis/mcp-toolbox/internal/tools/mysql/mysqlcommon"
 	"github.com/googleapis/mcp-toolbox/internal/util"
 	"github.com/googleapis/mcp-toolbox/internal/util/parameters"
 )
@@ -117,7 +118,7 @@ func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, para
 	}
 	resp, err := source.RunSQL(ctx, sqlStr, nil)
 	if err != nil {
-		return nil, util.ProcessGeneralError(err)
+		return nil, mysqlcommon.ProcessError(err)
 	}
 	return resp, nil
 }
