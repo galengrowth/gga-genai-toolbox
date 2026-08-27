@@ -308,6 +308,14 @@ func TestValidateExecuteSQL_deniesEmptyConfiguredDatabase(t *testing.T) {
 	}
 }
 
+func TestExecuteSQLUnsupportedMessage(t *testing.T) {
+	t.Parallel()
+	const want = "Only one read-only SELECT is allowed."
+	if got := ErrExecuteSQLUnsupported.Error(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestValidateSQLForDatabase_emptyDatabase(t *testing.T) {
 	t.Parallel()
 	if err := ValidateSQLForDatabase("SELECT * FROM `x`.`y`", ""); err != nil {

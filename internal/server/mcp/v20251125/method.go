@@ -190,7 +190,7 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *re
 	isAuthorized := tool.Authorized(verifiedAuthServices)
 	if !isAuthorized {
 		err = util.NewClientServerError(
-			"unauthorized Tool call: Please make sure you specify correct auth headers",
+			"Your app connection is missing or expired. Reconnect the app and try again.",
 			http.StatusUnauthorized,
 			nil,
 		)

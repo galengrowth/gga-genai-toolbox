@@ -231,7 +231,7 @@ func TestMcpEndpointWithoutInitialized(t *testing.T) {
 				"id":      "tools-call-tool4",
 				"error": map[string]any{
 					"code":    -32600.0,
-					"message": "unauthorized Tool call: Please make sure you specify correct auth headers",
+					"message": "Your app connection is missing or expired. Reconnect the app and try again.",
 				},
 			},
 		},
@@ -834,7 +834,7 @@ func TestMcpEndpoint(t *testing.T) {
 						"id":      "tools-call-tool4",
 						"error": map[string]any{
 							"code":    -32600.0,
-							"message": "unauthorized Tool call: Please make sure you specify correct auth headers",
+							"message": "Your app connection is missing or expired. Reconnect the app and try again.",
 						},
 					},
 				},

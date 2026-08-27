@@ -13,7 +13,7 @@ import (
 )
 
 // ErrExecuteSQLUnsupported is the client-facing error for mysql-execute-sql denials.
-var ErrExecuteSQLUnsupported = errors.New("this operation is not supported")
+var ErrExecuteSQLUnsupported = errors.New("Only one read-only SELECT is allowed.")
 
 // deniedExecuteSQLFunctions is the canonical function denylist shared by the
 // regex preflight and AST validation layers. Keep names lowercase.
