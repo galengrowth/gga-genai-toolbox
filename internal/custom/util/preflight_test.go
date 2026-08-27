@@ -63,4 +63,45 @@ func TestPerformPreflightCheck_billingBlockWithoutQuota(t *testing.T) {
 	if err == nil || ok {
 		t.Fatalf("expected billing block error, ok=%v err=%v", ok, err)
 	}
+	const want = "Your usage allowance is exhausted. Add credits or wait for it to reset."
+	if err.Error() != want {
+		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
+}
+
+func TestPerformPreflightCheck_quotaFailureIsSanitized(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal quota database unavailable", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	ctx := tbutil.WithQuotaEndpoint(context.Background(), ts.URL)
+	ok, err := PerformPreflightCheck(ctx, "some_tool")
+	if err == nil || ok {
+		t.Fatalf("expected quota check error, ok=%v err=%v", ok, err)
+	}
+	const want = "Usage limits could not be checked. Try again shortly."
+	if err.Error() != want {
+		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
+}
+
+func TestPerformPreflightCheck_quotaDenialIsActionable(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed": false, "reason": "internal policy identifier 42"})
+	}))
+	defer ts.Close()
+
+	ctx := tbutil.WithQuotaEndpoint(context.Background(), ts.URL)
+	ok, err := PerformPreflightCheck(ctx, "some_tool")
+	if err == nil || ok {
+		t.Fatalf("expected quota denial, ok=%v err=%v", ok, err)
+	}
+	const want = "Query allowance exceeded. Reduce the result size or try again after reset."
+	if err.Error() != want {
+		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
 }
