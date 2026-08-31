@@ -17,6 +17,7 @@ This is **fork-specific documentation**. It is **not** the official Google MCP T
 | `internal/custom/auth/hta/` | HTA-specific auth helpers (if used) |
 | `internal/sources/mysql/mysql.go` | `RunSQL` calls **`ValidateSQLForDatabase`** before `QueryContext` (does **not** apply to `cloud-sql-mysql`) |
 | `internal/tools/mysql/mysqlexecutesql/mysqlexecutesql.go` | **`ValidateExecuteSQL`** before `RunSQL` — covers **both** `type: mysql` and `type: cloud-sql-mysql` |
+| `internal/tools/mysql/mysqllisttables/mysqllisttables.go` | Parameterized schema discovery restricted to the configured database; excludes grantee and trigger metadata |
 
 Merge-friendly practice: keep **business logic** in `internal/custom/**` and **thin** call sites in `internal/server/**` / `internal/util/**` where upstream also changes often. See `internal/custom/README.md` for conflict-minimization tips.
 
@@ -176,7 +177,7 @@ Call site: **`internal/sources/mysql/mysql.go`** → **`RunSQL`**.
 
 Call site: **`internal/tools/mysql/mysqlexecutesql`** **`Invoke`**, **before** `source.RunSQL`. The tool’s compatible source interface requires **`MySQLDatabase()`**, which **both** `mysql` and `cloud-sql-mysql` implement. Arbitrary user SQL is therefore validated for **dev (`type: mysql`) and live (`type: cloud-sql-mysql`)**.
 
-Live exposes only **`execute_sql`** and **`list_tables`**. **`list_tables` does not use this function**, so its parameterized internal query can still read `INFORMATION_SCHEMA`; arbitrary SQL supplied to `execute_sql` must pass both validation layers.
+Live exposes only **`execute_sql`** and **`list_tables`**. **`list_tables` does not use this function**, so its parameterized internal query can still read `INFORMATION_SCHEMA`; that fixed query is restricted to the configured database and excludes grantee and trigger metadata. Arbitrary SQL supplied to `execute_sql` must pass both validation layers.
 
 Allowed: a **single** `SELECT` or `WITH … SELECT` against the configured application database.
 
@@ -199,6 +200,12 @@ MCP clients get an **agent/tool error** (`isError: true`), text exactly:
 Schema discovery for agents: use **`list_tables`**, not `execute_sql`.
 
 Implementation: **`internal/custom/util/sql_validation.go`** (regex preflight/canonical functions) and **`internal/custom/util/sql_validation_ast.go`** (parser/AST visitor). Tests and fuzz seeds: **`internal/custom/util/sql_validation_test.go`**.
+
+### 3. `list_tables` — scoped schema discovery
+
+Call site: **`internal/tools/mysql/mysqllisttables`** **`Invoke`**. The tool obtains the database from **`MySQLDatabase()`** and fails closed when it is not configured. Its fixed, parameterized `INFORMATION_SCHEMA` query returns base tables only from that configured database, even if the database account can see other non-system schemas.
+
+Simple output continues returning table/schema identification. Detailed output retains table comments, columns, constraints, and indexes, but intentionally omits schema grantees (`owner`) and all trigger metadata, including trigger names and source SQL. This changes metadata output only; it does not alter or disable database triggers.
 
 ### Cloud SQL for MySQL (`type: cloud-sql-mysql`)
 
@@ -339,6 +346,7 @@ Use this table when merging **upstream**: re-apply or preserve these paths if Gi
 | `internal/sources/mysql/mysql.go` | **`RunSQL`**: calls **`customutil.ValidateSQLForDatabase`** before `QueryContext`. Supports **`queryTimeout`** / **`queryParams`** (upstream). |
 | `internal/sources/cloudsqlmysql/cloud_sql_mysql.go` | Cloud SQL connector pool; **fork**: **`queryTimeout`** / **`queryParams`** on DSN (same semantics as `mysql`). `dsn_test.go` covers query string. No `ValidateSQLForDatabase` in `RunSQL`. |
 | `internal/tools/mysql/mysqlexecutesql/mysqlexecutesql.go` | **`ValidateExecuteSQL`** in **`Invoke`** (mysql + cloud-sql-mysql). |
+| `internal/tools/mysql/mysqllisttables/mysqllisttables.go` | Configured-database-only schema discovery; omits grantee and trigger metadata. |
 
 ### CLI / config
 

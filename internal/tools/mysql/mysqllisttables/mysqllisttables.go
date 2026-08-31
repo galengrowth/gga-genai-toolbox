@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"strings"
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/mcp-toolbox/internal/embeddingmodels"
@@ -44,15 +45,6 @@ const listTablesStatement = `
                         'schema_name', T.TABLE_SCHEMA,
                         'object_name', T.TABLE_NAME,
                         'object_type', 'TABLE',
-                        'owner', (
-                            SELECT
-                                IFNULL(U.GRANTEE, 'N/A')
-                            FROM
-                                INFORMATION_SCHEMA.SCHEMA_PRIVILEGES U
-                            WHERE
-                                U.TABLE_SCHEMA = T.TABLE_SCHEMA
-                            LIMIT 1
-                        ),
                         'comment', IFNULL(T.TABLE_COMMENT, ''),
                         'columns', (
                             SELECT
@@ -152,23 +144,6 @@ const listTablesStatement = `
                             ) AS IndexData
                             WHERE IndexData.TABLE_SCHEMA = T.TABLE_SCHEMA AND IndexData.TABLE_NAME = T.TABLE_NAME
                             ORDER BY IndexData.INDEX_NAME
-                        ),
-                        'triggers', (
-                            SELECT
-                                IFNULL(
-                                    JSON_ARRAYAGG(
-                                        JSON_OBJECT(
-                                            'trigger_name', TR.TRIGGER_NAME,
-                                            'trigger_definition', TR.ACTION_STATEMENT
-                                        )
-                                    ),
-                                    JSON_ARRAY()
-                                )
-                            FROM
-                                INFORMATION_SCHEMA.TRIGGERS TR
-                            WHERE
-                                TR.EVENT_OBJECT_SCHEMA = T.TABLE_SCHEMA AND TR.EVENT_OBJECT_TABLE = T.TABLE_NAME
-                            ORDER BY TR.TRIGGER_NAME
                         )
                     )
                 USING utf8mb4)
@@ -178,6 +153,7 @@ const listTablesStatement = `
     CROSS JOIN (SELECT @table_names := ?, @output_format := ?) AS variables
     WHERE
         T.TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+        AND T.TABLE_SCHEMA = ?
         AND (NULLIF(TRIM(@table_names), '') IS NULL OR FIND_IN_SET(T.TABLE_NAME, @table_names))
         AND T.TABLE_TYPE = 'BASE TABLE'
     ORDER BY
@@ -200,6 +176,7 @@ func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (tools.T
 
 type compatibleSource interface {
 	MySQLPool() *sql.DB
+	MySQLDatabase() string
 	RunSQL(context.Context, string, []any) (any, error)
 }
 
@@ -254,6 +231,10 @@ func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, para
 	if err != nil {
 		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, err)
 	}
+	database := strings.TrimSpace(source.MySQLDatabase())
+	if database == "" {
+		return nil, util.NewAgentError("Table listing is unavailable because no database is configured.", nil)
+	}
 
 	paramsMap := params.AsMap()
 
@@ -265,7 +246,7 @@ func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, para
 	if outputFormat != "simple" && outputFormat != "detailed" {
 		return nil, util.NewAgentError(fmt.Sprintf("invalid value for output_format: must be 'simple' or 'detailed', but got %q", outputFormat), nil)
 	}
-	resp, err := source.RunSQL(ctx, listTablesStatement, []any{tableNames, outputFormat})
+	resp, err := source.RunSQL(ctx, listTablesStatement, []any{tableNames, outputFormat, database})
 	if err != nil {
 		return nil, mysqlcommon.ProcessError(err)
 	}
